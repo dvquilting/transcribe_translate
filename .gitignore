@@ -1,0 +1,16 @@
+# Build output and downloaded sources (the build scripts fetch them)
+build/
+build-*/
+dist/
+third_party/
+installer/output/
+installer/redist/*.exe
+*.log
+
+# Android
+android/.gradle/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+*.apk
+.idea/

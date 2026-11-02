@@ -1,0 +1,26 @@
+Translate - licences
+====================
+
+Translate itself: (c) David Vickers.
+
+Included software:
+  llama.cpp and ggml ........... MIT licence (Georgi Gerganov and contributors)
+  miniz ........................ MIT licence (Rich Geldreich and contributors)
+  Qt 6 ......................... LGPL v3 (The Qt Company); the Qt libraries are
+                                 separate DLLs that you may replace
+  NVIDIA cuBLAS (optional) ..... NVIDIA CUDA Toolkit EULA (redistributable
+                                 runtime component)
+  MinGW-w64 runtime ............ GPL with runtime exception / ZPL
+
+Models are not included. They are downloaded from Hugging Face the first time
+each one is used, and are covered by their own licences:
+
+  TranslateGemma 4B / 12B / 27B  Gemma Terms of Use (Google),
+                                 https://ai.google.dev/gemma/terms - including
+                                 the Gemma Prohibited Use Policy.
+                                 GGUF conversions by mradermacher.
+  Hy-MT2 7B .................... Tencent; see the licence in
+                                 https://huggingface.co/tencent/Hy-MT2-7B
+  Qwen 3.5 9B / 35B-A3B ........ Apache 2.0 (Alibaba Qwen); GGUF by Unsloth
+
+The software is provided "as is", without warranty of any kind.

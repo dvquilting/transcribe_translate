@@ -1,0 +1,7 @@
+build/
+build-*/
+dist/
+third_party/
+installer/output/
+*.log
+installer/redist/

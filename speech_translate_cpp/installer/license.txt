@@ -1,0 +1,40 @@
+Speech Translate - licences
+===========================
+
+Speech Translate, Transcribe and Translate: (c) David Vickers.
+
+Included software:
+  CrispASR (speech) ............ MIT licence
+  llama.cpp and ggml ........... MIT licence (Georgi Gerganov and contributors)
+  miniz ........................ MIT licence
+  Qt 6 ......................... LGPL v3 (The Qt Company); the Qt libraries are
+                                 separate DLLs that you may replace
+  NVIDIA cuBLAS (optional) ..... NVIDIA CUDA Toolkit EULA (redistributable
+                                 runtime component)
+  MinGW-w64 runtime ............ GPL with runtime exception / ZPL
+  FFmpeg (optional) ............ GPL or LGPL, depending on the build included
+
+Models are not included. They are downloaded from Hugging Face the first time
+each one is used, and are covered by their own licences:
+
+  Speech:
+    Parakeet Ultra / Redux ..... CC-BY-4.0 (moondream, based on NVIDIA Parakeet)
+    Qwen3-ASR-1.7B, aligner .... Apache 2.0 (Alibaba Qwen)
+    Granite Speech 4.1 Plus .... Apache 2.0 (IBM)
+    Cohere Transcribe .......... Apache 2.0 (Cohere Labs)
+    ARK-ASR-3B ................. see https://huggingface.co/AutoArk-AI/ARK-ASR-3B
+    PCS punctuation model ...... Apache 2.0
+    Qwen3-4B-Instruct (AI options) Apache 2.0 (Alibaba Qwen)
+  Translation:
+    TranslateGemma 4B/12B/27B .. Gemma Terms of Use (Google),
+                                 https://ai.google.dev/gemma/terms, including
+                                 the Gemma Prohibited Use Policy
+    Hy-MT2 7B .................. Tencent; see https://huggingface.co/tencent/Hy-MT2-7B
+    Qwen 3.5 9B / 35B-A3B ...... Apache 2.0 (Alibaba Qwen)
+  Dubbing (voices):
+    Qwen3-TTS 1.7B ............. Apache 2.0 (Alibaba Qwen)
+    CosyVoice3 0.5B ............ Apache 2.0 (FunAudioLLM)
+    OmniVoice .................. Apache 2.0 (k2-fsa)
+    HT-Demucs (music/voice) .... MIT (Meta)
+
+The software is provided "as is", without warranty of any kind.

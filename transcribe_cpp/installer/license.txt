@@ -1,0 +1,32 @@
+Transcribe 1.0 - third-party components
+=======================================
+
+Transcribe converts speech in audio and video files to text on this computer.
+Nothing is uploaded; the speech models run locally.
+
+It is built from the following components, each under its own licence. The
+full licence texts are installed in the "licenses" folder.
+
+  CrispASR, ggml, llama.cpp .... MIT licence
+  Qt 6 (Widgets, Core, Gui) .... GNU LGPL version 3. The Qt libraries are
+                                 installed as separate DLLs and can be replaced.
+                                 Source: https://download.qt.io
+  NVIDIA cuBLAS (optional) ..... NVIDIA CUDA Toolkit EULA (redistributable
+                                 runtime component)
+  MinGW-w64 runtime ............ GPL with runtime exception / ZPL
+  FFmpeg (optional) ............ GPL or LGPL, depending on the build included.
+                                 Source: https://ffmpeg.org
+
+Models are not included. They are downloaded from Hugging Face the
+first time each one is used, and are covered by their own licences:
+
+  Parakeet Ultra / Redux ....... CC-BY-4.0 (moondream, based on NVIDIA Parakeet)
+  Qwen3-ASR-1.7B, aligner ...... Apache 2.0 (Alibaba Qwen)
+  Granite Speech 4.1 Plus ...... Apache 2.0 (IBM)
+  Cohere Transcribe ............ Apache 2.0 (Cohere Labs)
+  PCS punctuation model ........ Apache 2.0 (XLM-RoBERTa based)
+  ARK-ASR-3B ................... see https://huggingface.co/AutoArk-AI/ARK-ASR-3B
+  Qwen3-4B-Instruct-2507 ....... Apache 2.0 (Alibaba Qwen; GGUF by Unsloth),
+                                 used for the optional AI post-processing
+
+The software is provided "as is", without warranty of any kind.
