@@ -33,6 +33,13 @@ const std::vector<ModelInfo>& model_table() {
          std::string(kHf) + "mradermacher/translategemma-12b-it-GGUF/resolve/main/translategemma-12b-it.Q6_K.gguf",
          "9.7 GB", 9660827392ull, "Google. Very good quality; fits a 12-16 GB graphics card. 55 languages.",
          kGemmaLangs, 4096, 400},
+        {"translategemma-12b-q4", "TranslateGemma 12B (smaller)", Family::TranslateGemma,
+         "translategemma-12b-it.Q4_K_M.gguf",
+         std::string(kHf) + "mradermacher/translategemma-12b-it-GGUF/resolve/main/translategemma-12b-it.Q4_K_M.gguf",
+         "7.3 GB", 7300794112ull,
+         "Google. 12B in a smaller file (4-bit): slightly lower quality than the 9.7 GB one, but leaves room on a "
+         "16 GB graphics card for the faster mode's helper model. 55 languages.",
+         kGemmaLangs, 4096, 400},
         {"translategemma-27b", "TranslateGemma 27B", Family::TranslateGemma, "translategemma-27b-it.Q4_K_M.gguf",
          std::string(kHf) + "mradermacher/translategemma-27b-it-GGUF/resolve/main/translategemma-27b-it.Q4_K_M.gguf",
          "16.5 GB", 16546704480ull,
@@ -71,6 +78,25 @@ const std::vector<ModelInfo>& phone_model_table() {
          "Alibaba. General-purpose; for language pairs the others don't cover.", {}, 4096, 400},
     };
     return models;
+}
+
+const std::vector<ModelInfo>& draft_model_table() {
+    static const std::vector<ModelInfo> models = {
+        {"translategemma-4b", "TranslateGemma 4B", Family::TranslateGemma, "translategemma-4b-it.Q4_K_M.gguf",
+         std::string(kHf) + "mradermacher/translategemma-4b-it-GGUF/resolve/main/translategemma-4b-it.Q4_K_M.gguf",
+         "2.5 GB", 2489909760ull, "TranslateGemma 4B: guesses the larger models' words best.", kGemmaLangs, 4096, 400},
+        {"gemma-3-1b", "Gemma 3 1B", Family::TranslateGemma, "gemma-3-1b-it-Q8_0.gguf",
+         std::string(kHf) + "ggml-org/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q8_0.gguf", "1.1 GB",
+         1069306368ull, "Gemma 3 1B: smaller and faster, guesses less well (it isn't a translation model).",
+         kGemmaLangs, 4096, 400},
+    };
+    return models;
+}
+
+const ModelInfo* find_draft_model(const std::string& key) {
+    for (const auto& m : draft_model_table())
+        if (m.key == key) return &m;
+    return nullptr;
 }
 
 const ModelInfo* find_phone_model(const std::string& key) {

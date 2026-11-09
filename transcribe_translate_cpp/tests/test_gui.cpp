@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSettings>
@@ -21,6 +22,7 @@
 
 #include "history_page.h"
 #include "jobgate.h"
+#include "pdf_files.h"
 #include "mainwindow.h"
 #include "speech_page.h"
 #include "transcribe_page.h"
@@ -73,6 +75,8 @@ int main(int argc, char** argv) {
     qputenv("XDG_DATA_HOME", home.filePath(QStringLiteral("data")).toUtf8());
     QStandardPaths::setTestModeEnabled(true);
     QApplication app(argc, argv);
+    const bool pdfium = tt::pdfiumProblem().isEmpty();  // reading PDFs (TT_PDFIUM)
+    const int jobs = pdfium ? 5 : 4;                     // in the History at the end
     QApplication::setOrganizationName(QStringLiteral("DavidV"));
     QApplication::setApplicationName(QStringLiteral("TranscribeTranslateTest"));
     QApplication::setApplicationDisplayName(QStringLiteral("Transcribe & Translate"));
@@ -88,6 +92,7 @@ int main(int argc, char** argv) {
         s.setValue(QStringLiteral("Translate/to"), QStringLiteral("de"));
         s.setValue(QStringLiteral("SpeechTranslate/to"), QStringLiteral("de"));
         s.setValue(QStringLiteral("SpeechTranslate/from"), QStringLiteral("en"));
+        s.setValue(QStringLiteral("SpeechTranslate/savePdf"), true);
     }
 
     const QString historyFile = home.filePath(QStringLiteral("history.json"));
@@ -152,6 +157,24 @@ int main(int argc, char** argv) {
         runs = fakeRuns(log);
         CHECK(runs.size() == 2 && runs.value(1).startsWith(QStringLiteral("translate\t")));
         CHECK(runs.value(1).contains(QStringLiteral("\t-t\tde\t")));
+        // TranslateGemma 12B (the default) is sped up by TranslateGemma 4B unless switched off.
+        CHECK(runs.value(1).contains(QStringLiteral("\t--draft\tauto")));
+        {
+            // The faster mode's choices: auto, the two helpers, off.
+            QStringList values;
+            for (QComboBox* c : lp->findChildren<QComboBox*>())
+                if (c->findData(QStringLiteral("gemma-3-1b")) >= 0)
+                    for (int i = 0; i < c->count(); ++i) values << c->itemData(i).toString();
+            CHECK(values == (QStringList{QStringLiteral("auto"), QStringLiteral("translategemma-4b"),
+                                         QStringLiteral("gemma-3-1b"), QStringLiteral("off")}));
+        }
+        {
+            // What the faster mode gave, next to Compute.
+            bool shown = false;
+            for (QLabel* l : lp->findChildren<QLabel*>())
+                if (l->text().contains(QStringLiteral("Compute:")) && l->text().contains(QStringLiteral("1.50x"))) shown = true;
+            CHECK(shown);
+        }
         CHECK(w.historyPage()->jobs().size() == 2 && w.historyPage()->jobs().value(0).kind == QStringLiteral("Translate"));
 
         // ---- one job at a time ----
@@ -190,6 +213,7 @@ int main(int argc, char** argv) {
         runs = fakeRuns(log);
         CHECK(runs.size() == 5);
         CHECK(runs.value(3).startsWith(QStringLiteral("transcribe\t")) && runs.value(4).startsWith(QStringLiteral("translate\t")));
+        CHECK(runs.value(4).contains(QStringLiteral("\t--draft\tauto")));
         const QString deSrt = work.filePath(QStringLiteral("talk.de.srt"));
         CHECK(readText(deSrt).contains(QStringLiteral("[de] Good morning, everyone.")));
         CHECK(readText(deSrt).contains(QStringLiteral("00:00:01,000 --> 00:00:03,000")));
@@ -199,6 +223,40 @@ int main(int argc, char** argv) {
             const tt::JobRecord& r = w.historyPage()->jobs().first();
             CHECK(r.kind == QStringLiteral("Speech translation") && r.ok);
             CHECK(r.outputs.contains(QDir::toNativeSeparators(deSrt)));
+            // The translated text as a PDF too (written here, from the subtitles).
+            CHECK(r.outputs.contains(QDir::toNativeSeparators(work.filePath(QStringLiteral("talk.de.pdf")))));
+        }
+        CHECK(QFileInfo(work.filePath(QStringLiteral("talk.de.pdf"))).size() > 500);
+
+        // ---- a PDF: read here, translated as Markdown, written as a PDF ----
+        if (!pdfium) std::fprintf(stderr, "note: %s - PDF translation not tested\n", qPrintable(tt::pdfiumProblem()));
+        if (pdfium) {
+            const QString srcPdf = work.filePath(QStringLiteral("report.pdf"));
+            tt::PdfDocument d;
+            d.blocks << tt::PdfBlock{tt::PdfBlock::Heading1, QStringLiteral("Quarterly report")}
+                     << tt::PdfBlock{tt::PdfBlock::Paragraph, QStringLiteral("The river carries the boats to the sea.")}
+                     << tt::PdfBlock{tt::PdfBlock::PageBreak, QString()}
+                     << tt::PdfBlock{tt::PdfBlock::Paragraph, QStringLiteral("A sentence on the second page.")};
+            CHECK(tt::writePdf(d, srcPdf, nullptr));
+            tabs->setCurrentIndex(1);
+            lp->openFile(srcPdf);
+            click(lp, QStringLiteral("Translate file"));
+            CHECK(waitFor([&] { return !lp->isRunning(); }));
+            const QString dePdf = work.filePath(QStringLiteral("report.de.pdf"));
+            const tt::PdfReadResult r = tt::readPdf(dePdf);
+            CHECK(r.ok && r.pages == 2);
+            QString text;
+            for (const auto& b : r.doc.blocks) text += b.text + QLatin1Char('\n');
+            CHECK(text.contains(QStringLiteral("[de] The river carries the boats to the sea.")));
+            CHECK(text.contains(QStringLiteral("[de] A sentence on the second page.")));
+            runs = fakeRuns(log);
+            CHECK(runs.last().startsWith(QStringLiteral("translate\t")) && runs.last().contains(QStringLiteral("source.md\t")));
+            CHECK(!w.historyPage()->jobs().isEmpty());
+            if (!w.historyPage()->jobs().isEmpty()) {
+                const tt::JobRecord& j = w.historyPage()->jobs().first();
+                CHECK(j.kind == QStringLiteral("Translate") && j.ok && QFileInfo(j.input) == QFileInfo(srcPdf));
+                CHECK(j.outputs.size() == 1 && QFileInfo(j.outputs.value(0)) == QFileInfo(dePdf));
+            }
         }
 
         // Pictures of the tabs, for a look at the layout: TT_SCREENSHOTS=<folder>.
@@ -228,8 +286,8 @@ int main(int argc, char** argv) {
     // ---- the History is kept ----
     {
         HistoryPage h(historyFile);
-        CHECK(h.jobs().size() == 4);
-        CHECK(h.jobs().value(3).kind == QStringLiteral("Transcribe"));
+        CHECK(h.jobs().size() == jobs);
+        CHECK(h.jobs().value(jobs - 1).kind == QStringLiteral("Transcribe"));
         CHECK(h.jobs().value(0).finished.isValid());
         for (int i = 0; i < HistoryPage::kMaxJobs + 3; ++i) h.add({QStringLiteral("Translate"), QString(), {}, QStringLiteral("x"), true, QDateTime::currentDateTime()});
         CHECK(h.jobs().size() == HistoryPage::kMaxJobs);

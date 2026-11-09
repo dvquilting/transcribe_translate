@@ -69,15 +69,16 @@ private:
         QString asr, from, mt, to, device;
         int threads = 0;
         bool align = true, context = true;
+        QString draft = QStringLiteral("auto");  // --draft: auto, a helper model, or off
         bool speakers = false;  // several speakers: find who speaks when
         int numSpeakers = 0;    // how many (0 = detect)
-        bool saveOriginal = false, saveBilingual = false, saveText = false;
+        bool saveOriginal = false, saveBilingual = false, saveText = false, savePdf = false;
         bool dub = false;
         QString tts, voice, background, dubFormat;
         bool consent = false, keepAccent = false;
     };
     struct Outputs {
-        QString translatedSrt, originalSrt, bilingualSrt, translatedTxt, dubbed;
+        QString translatedSrt, originalSrt, bilingualSrt, translatedTxt, translatedPdf, dubbed;
         QStringList all() const;
     };
 
@@ -131,12 +132,14 @@ private:
     QCheckBox* origCheck_ = nullptr;
     QCheckBox* biCheck_ = nullptr;
     QCheckBox* txtCheck_ = nullptr;
+    QCheckBox* pdfCheck_ = nullptr;  // the translated text as a PDF
     QGroupBox* advancedBox_ = nullptr;
     QWidget* advancedBody_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
     QSpinBox* threadsSpin_ = nullptr;
     QCheckBox* alignCheck_ = nullptr;
     QCheckBox* contextCheck_ = nullptr;
+    QComboBox* draftCombo_ = nullptr;  // the faster mode: --draft auto|<helper>|off (faster_mode.h)
     QGroupBox* dubBox_ = nullptr;
     QComboBox* ttsCombo_ = nullptr;
     QLabel* ttsDesc_ = nullptr;
@@ -176,6 +179,7 @@ private:
     QTemporaryDir* tempDir_ = nullptr;
     Outputs outputs_;
     QString lastError_;
+    bool translatingSeen_ = false;  // this step's engine reports "progress: translating"
     QElapsedTimer clock_;
     qint64 stepStartMs_ = 0;
     double asrSeconds_ = -1, mtSeconds_ = -1, dubSeconds_ = -1, audioSeconds_ = -1;

@@ -13,6 +13,7 @@
 
 #include "json.hpp"  // nlohmann/json (MIT), from CrispASR's examples/
 
+#include "cpu_cores.h"    // ../common
 #include "docx_writer.h"  // ../common
 #include "fileio.h"
 #include "model_catalog.h"
@@ -71,11 +72,31 @@ std::string file_of(const Callbacks& cb, const std::string& file, const std::str
 int threads_of(const json& r) {
     const int t = r.value("threads", 0);
     if (t > 0) return t;
-    // The big cores: a phone's little cores slow the others down in ggml's
-    // evenly split work. 4 of 8 on most phones.
+    // One thread per fast core: a phone's little cores slow the others down in
+    // ggml's evenly split work (5 of 8 on a Galaxy S23).
+    const auto fast = pk::fast_cores();
+    if (!fast.empty()) return std::clamp((int)fast.size(), 2, 8);
     const unsigned n = std::thread::hardware_concurrency();
     return n >= 8 ? 4 : n >= 4 ? (int)n / 2 + 1 : 1;
 }
+
+// For a job: the engine's threads run on the fast cores only (the threads ggml
+// and CrispASR start inherit this), unless the user chose more threads than
+// there are fast cores. Reports what it did.
+struct FastCores {
+    explicit FastCores(const Callbacks& cb, int threads)
+        : cores(pk::fast_cores()), affinity((int)cores.size() >= threads ? cores : std::vector<int>{}) {
+        std::string list;
+        for (int c : cores) list += (list.empty() ? "" : ", ") + std::to_string(c);
+        const std::string n = std::to_string(threads) + (threads == 1 ? " thread" : " threads");
+        if (affinity.active())
+            say(cb, "Processor: " + n + " on the fast cores (" + list + ")");
+        else
+            say(cb, "Processor: " + n);
+    }
+    std::vector<int> cores;
+    pk::CoreAffinity affinity;
+};
 
 std::vector<float> read_pcm(const std::string& path) {
     std::ifstream f(fs::path(path), std::ios::binary);
@@ -164,6 +185,7 @@ std::string transcribe(const std::string& request_json, const Callbacks& cb) {
         po.language = language == "auto" ? "" : language;
         po.engine.device = "cpu";
         po.engine.threads = threads_of(r);
+        FastCores fast_cores(cb, po.engine.threads);
         po.punctuation = r.value("punctuation", std::string("auto"));
         po.want_cues = wants("srt");
         po.align = r.value("word_timing", false);
@@ -322,6 +344,7 @@ std::string translate(const std::string& request_json, const Callbacks& cb) {
         tl::EngineOptions eo;
         eo.device = "cpu";
         eo.threads = threads_of(r);
+        FastCores fast_cores(cb, eo.threads);
         eo.n_ctx = model->n_ctx;
         tl::Llm llm(model_path, eo);
         llm.set_cancel_flag(cb.cancel);

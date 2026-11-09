@@ -73,6 +73,13 @@ public:
                                              const UnitDone& unit_done = nullptr);
 
     const TranslateStats& stats() const { return stats_; }
+    // During translate_units: the share of the text translated so far (0..1,
+    // never decreasing), updated as the model writes, not only per piece.
+    // Pieces count by the tokens of their source text; within a piece, the
+    // output written so far is compared with the source's length (capped
+    // below 100% until the piece is done).
+    using Fraction = std::function<void(double done)>;
+    void set_fraction_progress(Fraction f) { fraction_ = std::move(f); }
     void set_source(const std::string& code) { prompts_.source = code; opts_.source = code; }
 
 private:
@@ -96,6 +103,14 @@ private:
     PromptBuilder prompts_;
     TranslateStats stats_;
     bool debug_ = false;
+
+    void report(double weight_done);  // to fraction_, as a share of total_w_
+    Fraction fraction_;
+    double total_w_ = 0;       // source tokens of all pieces
+    double done_w_ = 0;        // ... of the pieces finished
+    double piece_w_ = 0;       // ... of the piece being translated
+    double piece_done_w_ = 0;  // ... of the runs of that piece finished
+    double reported_ = -1;
 };
 
 }  // namespace tl

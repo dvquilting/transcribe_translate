@@ -2,6 +2,7 @@
 // "transcribe" and "translate" the way the real engine does (the lines the window
 // reads, the files it writes) without any model. Each run appends its command
 // line to $TT_FAKE_LOG; $TT_FAKE_SLEEP_MS makes it take that long.
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -75,8 +76,13 @@ int main(int argc, char** argv) {
         const std::string in = read(a[1]);
         say("Words : 9");
         say("Engine: CPU (fake)");
+        const bool draft = std::find(a.begin(), a.end(), "--draft") != a.end();
+        if (draft) say("Draft : translategemma-4b-it.Q4_K_M.gguf (speculative decoding: the same translation, sooner)");
         say("Translating ...");
+        say("progress: translating 0/1000 permille");
+        say("progress: translating 500/1000 permille");
         say("progress: translate 1/1 parts");
+        say("progress: translating 1000/1000 permille");
         std::string res;
         std::istringstream lines(in);
         for (std::string line; std::getline(lines, line);) {
@@ -86,6 +92,7 @@ int main(int argc, char** argv) {
         }
         std::ofstream(out, std::ios::binary) << res;
         say("Translated in 0.1 s (9 words, 5400 words/min)");
+        if (draft) say("Draft : drafted in 90% of the steps; writing took 1.0 s, about 1.5 s without the draft model (1.50x)");
         say("wrote " + out);
         return 0;
     }

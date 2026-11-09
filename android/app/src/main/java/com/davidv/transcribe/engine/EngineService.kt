@@ -119,6 +119,7 @@ class EngineService : Service() {
         val out = File(dir, "out").apply { mkdirs() }
         val pcm = File(dir, "audio.raw")
         update(message = "Decoding the audio...", phase = "decode", done = 0, total = 1000, unit = "")
+        val decodeStart = System.nanoTime()
         val seconds = try {
             AudioDecoder.decode(this, Uri.parse(s.getString("input")), pcm,
                 { f -> update(phase = "decode", done = (f * 1000).toLong(), total = 1000) }, { cancel.get() })
@@ -127,6 +128,8 @@ class EngineService : Service() {
             throw e
         }
         log("Audio : %d:%02d (%.1f s)".format((seconds / 60).toInt(), (seconds % 60).toInt(), seconds))
+        val decodeSeconds = (System.nanoTime() - decodeStart) / 1e9
+        log("Decoded in %.1f s (%.0fx real time)".format(decodeSeconds, seconds / maxOf(decodeSeconds, 1e-3)))
         set { it.copy(audioSeconds = seconds) }
         val formats = s.optJSONArray("formats")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: listOf("txt")
         val name = s.optString("name", "transcript")

@@ -34,7 +34,7 @@ QScrollArea* scrolled(QWidget* page) {
 
 bool isDocument(const QString& path) {
     static const QStringList ext = {QStringLiteral("txt"), QStringLiteral("md"), QStringLiteral("markdown"),
-                                    QStringLiteral("srt"), QStringLiteral("docx")};
+                                    QStringLiteral("srt"), QStringLiteral("docx"), QStringLiteral("pdf")};
     return ext.contains(QFileInfo(path).suffix().toLower());
 }
 
@@ -57,7 +57,7 @@ MainWindow::MainWindow(const QString& historyFile, QWidget* parent)
     tabs_->addTab(scrolled(speech_), tr("Speech translation"));
     tabs_->addTab(history_, tr("History"));
     tabs_->setTabToolTip(0, tr("Speech to text: .txt, subtitles, Word, PDF"));
-    tabs_->setTabToolTip(1, tr("Translate text, .txt, .md, .srt and Word documents"));
+    tabs_->setTabToolTip(1, tr("Translate text, .txt, .md, .srt, Word and PDF documents"));
     tabs_->setTabToolTip(2, tr("Audio or video to translated subtitles, and a dubbed soundtrack"));
     tabs_->setTabToolTip(3, tr("The jobs run so far, and the files they saved"));
 
@@ -136,7 +136,7 @@ QString MainWindow::helpHtml() {
         "<ul>"
         "<li><a href=\"#transcribe\"><b>Transcribe</b></a>: the speech in an audio or video file as text, "
         "subtitles, a Word document or a PDF. <b>Translate...</b> takes the transcript to the Translate tab.</li>"
-        "<li><a href=\"#translate\"><b>Translate</b></a>: text you type, or .txt, .md, .srt and Word files.</li>"
+        "<li><a href=\"#translate\"><b>Translate</b></a>: text you type, or .txt, .md, .srt, Word and PDF files.</li>"
         "<li><a href=\"#speech\"><b>Speech translation</b></a>: an audio or video file to subtitles in another "
         "language, and optionally a dubbed soundtrack in the speaker's voice.</li>"
         "<li><b>History</b>: the jobs run so far, with the files they saved (open them, open their folder, or run "
@@ -156,6 +156,8 @@ void MainWindow::showModels() {
     // a .src sidecar, Translate's are its model files.
     pk::ModelOwner translate;
     for (const auto& m : tl::model_table()) translate.names << QString::fromStdString(m.file);
+    // The helper models of the faster mode (speculative decoding).
+    for (const auto& m : tl::draft_model_table()) translate.names << QString::fromStdString(m.file);
     pk::ModelsDialog dlg({{tr("Speech recognition, spelling and voice models"),
                            pk::crispasr_models_dir(transcribe_->modelsDir()), pk::ModelOwner{true, {}}},
                           {tr("Translation models"), pk::translate_models_dir(translate_->modelsDir()), translate}},

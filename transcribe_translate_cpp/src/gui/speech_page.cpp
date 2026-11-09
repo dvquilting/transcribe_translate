@@ -1,4 +1,6 @@
 #include "speech_page.h"
+#include "faster_mode.h"
+#include "pdf_files.h"
 
 #include <algorithm>
 
@@ -235,7 +237,7 @@ public:
 
 QStringList SpeechPage::Outputs::all() const {
     QStringList l;
-    for (const QString& s : {translatedSrt, originalSrt, bilingualSrt, translatedTxt, dubbed})
+    for (const QString& s : {translatedSrt, originalSrt, bilingualSrt, translatedTxt, translatedPdf, dubbed})
         if (!s.isEmpty()) l << s;
     return l;
 }
@@ -347,6 +349,9 @@ void SpeechPage::buildUi() {
     ov->addWidget(origCheck_, 0, 1);
     ov->addWidget(biCheck_, 1, 0);
     ov->addWidget(txtCheck_, 1, 1);
+    pdfCheck_ = new QCheckBox(tr("Translated text as PDF (NAME.<language>.pdf)"));
+    pdfCheck_->setToolTip(tr("The translated text in paragraphs, as a PDF document"));
+    ov->addWidget(pdfCheck_, 2, 1);
     root->addWidget(outs);
 
     // --- step 3: dubbing (optional) ----------------------------------------------
@@ -423,6 +428,8 @@ void SpeechPage::buildUi() {
     contextCheck_ = new QCheckBox(tr("Show the translation model the preceding text (Hy-MT2 and Qwen)"));
     contextCheck_->setChecked(true);
     af->addRow(QString(), contextCheck_);
+    draftCombo_ = tt::makeFasterModeCombo();
+    af->addRow(tr("Faster mode:"), draftCombo_);
     advancedBody_->setVisible(false);
     connect(advancedBox_, &QGroupBox::toggled, advancedBody_, &QWidget::setVisible);
     root->addWidget(advancedBox_);
@@ -538,6 +545,7 @@ void SpeechPage::updateEnabledState() {
             notes << tr("%1 was not trained on %2.").arg(q(mt->display), fromCombo_->currentText());
         if (from == to) notes << tr("The spoken language and the target language are the same.");
         contextCheck_->setEnabled(mt->family != tl::Family::TranslateGemma);
+        draftCombo_->setEnabled(tt::fasterModeApplies(mt));
     }
     langNote_->setText(notes.join(QLatin1Char(' ')));
     langNote_->setVisible(!notes.isEmpty());
@@ -650,11 +658,14 @@ SpeechPage::RunConfig SpeechPage::readConfig() const {
     c.threads = threadsSpin_->value();
     c.align = alignCheck_->isChecked();
     c.context = contextCheck_->isChecked();
+    c.draft = tt::fasterModeApplies(tl::find_model(c.mt.toStdString())) ? draftCombo_->currentData().toString()
+                                                                         : QStringLiteral("off");
     c.speakers = speakersCheck_->isChecked();
     c.numSpeakers = speakersCount_->currentData().toInt();
     c.saveOriginal = origCheck_->isChecked();
     c.saveBilingual = biCheck_->isChecked();
     c.saveText = txtCheck_->isChecked();
+    c.savePdf = pdfCheck_->isChecked();
     c.dub = dubBox_->isChecked();
     c.tts = ttsCombo_->currentData().toString();
     c.voice = voiceCombo_->currentData().toString();
@@ -674,6 +685,7 @@ SpeechPage::Outputs SpeechPage::plannedOutputs(const RunConfig& c) const {
     if (c.saveOriginal) o.originalSrt = QDir::toNativeSeparators(base + QStringLiteral(".srt"));
     if (c.saveBilingual) o.bilingualSrt = QDir::toNativeSeparators(base + QLatin1Char('.') + lang + QStringLiteral(".bilingual.srt"));
     if (c.saveText) o.translatedTxt = QDir::toNativeSeparators(base + QLatin1Char('.') + lang + QStringLiteral(".txt"));
+    if (c.savePdf) o.translatedPdf = QDir::toNativeSeparators(base + QLatin1Char('.') + lang + QStringLiteral(".pdf"));
     if (c.dub) {
         QString ext = c.dubFormat;
         if (ext == QLatin1String("video")) {
@@ -756,6 +768,7 @@ QStringList SpeechPage::translateArgs() const {
     if (cfg_.device != QLatin1String("auto")) a << QStringLiteral("--device") << cfg_.device;
     if (cfg_.threads > 0) a << QStringLiteral("--threads") << QString::number(cfg_.threads);
     if (!cfg_.context) a << QStringLiteral("--no-context");
+    if (cfg_.draft != QLatin1String("off")) a << QStringLiteral("--draft") << cfg_.draft;
     // Never one sentence across two speakers: each keeps their own words.
     if (cfg_.speakers) a << QStringLiteral("--speakers") << tempDir_->filePath(QStringLiteral("speakers.txt"));
     return a;
@@ -857,6 +870,7 @@ void SpeechPage::start() {
 void SpeechPage::runStep(Step step) {
     step_ = step;
     lastError_.clear();
+    translatingSeen_ = false;
     stepStartMs_ = clock_.elapsed();
     // The dub's work folder goes next to its output only now, so a run that
     // stops before step 3 leaves nothing there.
@@ -967,6 +981,17 @@ void SpeechPage::writeSubtitles() {
         failed << outputs_.bilingualSrt;
     if (!outputs_.translatedTxt.isEmpty() && !writeAll(outputs_.translatedTxt, st::subtitles_to_text(trCues, 5)))
         failed << outputs_.translatedTxt;
+    if (!outputs_.translatedPdf.isEmpty()) {
+        tt::PdfDocument doc = tt::pdfFromText(QString::fromUtf8(st::subtitles_to_text(trCues, 5).c_str()));
+        doc.title = QFileInfo(cfg_.input).completeBaseName();
+        doc.titleHeading = true;
+        doc.language = cfg_.to;
+        QString error;
+        if (!tt::writePdf(doc, outputs_.translatedPdf, &error)) {
+            failed << outputs_.translatedPdf;
+            appendLog(tr("\nCould not write %1: %2\n").arg(outputs_.translatedPdf, error));
+        }
+    }
     writeFailures_ = failed;
     resultView_->setPlainText(QString::fromUtf8(trn.c_str()));
 }
@@ -1063,7 +1088,8 @@ void SpeechPage::fail(const QString& message) {
 // For a run that stopped in step 3: the subtitle files are already saved.
 QString SpeechPage::savedSubtitlesNote() {
     QStringList saved, names;
-    for (const QString& f : {outputs_.translatedSrt, outputs_.originalSrt, outputs_.bilingualSrt, outputs_.translatedTxt})
+    for (const QString& f : {outputs_.translatedSrt, outputs_.originalSrt, outputs_.bilingualSrt, outputs_.translatedTxt,
+                             outputs_.translatedPdf})
         if (!f.isEmpty() && !writeFailures_.contains(f)) saved << f, names << QFileInfo(f).fileName();
     QString note;
     if (!saved.isEmpty()) {
@@ -1124,7 +1150,7 @@ void SpeechPage::setRunning(bool running) {
     startBtn_->setEnabled(!running);
     cancelBtn_->setEnabled(running);
     for (QWidget* w : std::initializer_list<QWidget*>{asrCombo_, mtCombo_, fromCombo_, toCombo_, origCheck_, biCheck_,
-                                                      txtCheck_, inputEdit_, outDirEdit_, inBrowseBtn_, outBrowseBtn_,
+                                                      txtCheck_, pdfCheck_, inputEdit_, outDirEdit_, inBrowseBtn_, outBrowseBtn_,
                                                       dubBox_, advancedBox_, speakersCheck_, speakersCount_})
         w->setEnabled(!running);
     if (running) {
@@ -1139,10 +1165,16 @@ void SpeechPage::parseLine(const QString& line) {
     static const QRegularExpression progressRe(QStringLiteral("^progress: (\\w+) (\\d+)/(\\d+) (\\w+)"));
     if (const auto m = progressRe.match(line); m.hasMatch()) {
         const qint64 done = m.captured(2).toLongLong(), total = m.captured(3).toLongLong();
+        const QString phase = m.captured(1), unit = m.captured(4);
+        // While translating, the bar follows the share translated ("translating",
+        // as the model writes), not the finished pieces ("translate").
+        if (phase == QLatin1String("translate") && translatingSeen_) return;
         progress_->setRange(0, (int)std::max<qint64>(total, 1));
         progress_->setValue((int)done);
-        const QString phase = m.captured(1), unit = m.captured(4);
-        if (phase == QLatin1String("download"))
+        if (phase == QLatin1String("translating")) {
+            translatingSeen_ = true;
+            statusLabel_->setText(tr("Translating: %1%").arg(total > 0 ? done * 100 / total : 0));
+        } else if (phase == QLatin1String("download"))
             statusLabel_->setText(tr("Downloading the translation model (first use only): %1 of %2 GB")
                                       .arg(done / 1000.0, 0, 'f', 1).arg(total / 1000.0, 0, 'f', 1));
         else if (phase == QLatin1String("speak"))
@@ -1249,11 +1281,13 @@ void SpeechPage::loadSettings() {
     origCheck_->setChecked(s.value(QStringLiteral("saveOriginal"), true).toBool());
     biCheck_->setChecked(s.value(QStringLiteral("saveBilingual"), false).toBool());
     txtCheck_->setChecked(s.value(QStringLiteral("saveText"), false).toBool());
+    pdfCheck_->setChecked(s.value(QStringLiteral("savePdf"), false).toBool());
     outDirEdit_->setText(s.value(QStringLiteral("outDir")).toString());
     deviceCombo_->setCurrentText(s.value(QStringLiteral("device"), QStringLiteral("auto")).toString());
     threadsSpin_->setValue(s.value(QStringLiteral("threads"), 0).toInt());
     alignCheck_->setChecked(s.value(QStringLiteral("align"), true).toBool());
     contextCheck_->setChecked(s.value(QStringLiteral("context"), true).toBool());
+    tt::selectFasterMode(draftCombo_, tt::loadFasterMode(s));
     speakersCheck_->setChecked(s.value(QStringLiteral("speakers"), false).toBool());
     selectData(speakersCount_, s.value(QStringLiteral("numSpeakers"), 0));
     dubBox_->setChecked(s.value(QStringLiteral("dub"), false).toBool());
@@ -1275,11 +1309,13 @@ void SpeechPage::saveSettings() {
     s.setValue(QStringLiteral("saveOriginal"), origCheck_->isChecked());
     s.setValue(QStringLiteral("saveBilingual"), biCheck_->isChecked());
     s.setValue(QStringLiteral("saveText"), txtCheck_->isChecked());
+    s.setValue(QStringLiteral("savePdf"), pdfCheck_->isChecked());
     s.setValue(QStringLiteral("outDir"), outDirEdit_->text());
     s.setValue(QStringLiteral("device"), deviceCombo_->currentText());
     s.setValue(QStringLiteral("threads"), threadsSpin_->value());
     s.setValue(QStringLiteral("align"), alignCheck_->isChecked());
     s.setValue(QStringLiteral("context"), contextCheck_->isChecked());
+    s.setValue(QStringLiteral("draftModel"), draftCombo_->currentData());
     s.setValue(QStringLiteral("speakers"), speakersCheck_->isChecked());
     s.setValue(QStringLiteral("numSpeakers"), speakersCount_->currentData());
     s.setValue(QStringLiteral("dub"), dubBox_->isChecked());

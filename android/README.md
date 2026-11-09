@@ -53,6 +53,10 @@ INSTALL=1 ./build_apk.sh    # and install it on the phone (USB debugging on)
 COMPATIBLE_CPU=1 ./build_apk.sh   # for phones older than Snapdragon 8 Gen 1 (no i8mm)
 ```
 
+On Windows, run `build_apk.bat` instead (`build_apk.bat install`, `build_apk.bat compatible`).
+It uses Java 17 to 24: `JAVA_HOME` if it is one of those, else Android Studio's own Java.
+The Android Gradle plugin refuses older ones, and this Gradle (8.14) can't run on Java 25.
+
 Needs the Android SDK (Android Studio installs it; `ANDROID_HOME`), git and a
 JDK 17+. The script installs the SDK packages it needs (platform 36, NDK r28c,
 CMake 3.31) and fetches CrispASR and miniz at the commits pinned by the desktop

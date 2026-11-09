@@ -6,7 +6,7 @@ runs on your own computer - nothing is uploaded.
 
 Start it from the Start menu, or right-click a file in File Explorer
 ("Transcribe & Translate" for audio and video, "Translate..." for text,
-subtitle and Word files).
+subtitle, Word and PDF files).
 
 The window has four tabs:
 
@@ -15,9 +15,11 @@ The window has four tabs:
                       post-processing (smart paragraphs, a corrected copy, a
                       summary). "Translate..." takes the transcript straight
                       to the Translate tab.
-  Translate           text you type or paste, or a .txt, .md, .srt or Word
-                      file, translated with a local language model. The layout
-                      is kept: paragraphs, subtitle timing, Word styles.
+  Translate           text you type or paste, or a .txt, .md, .srt, Word or
+                      PDF file, translated with a local language model. The
+                      layout is kept: paragraphs, subtitle timing, Word
+                      styles; a PDF is rebuilt as headings and paragraphs on
+                      new pages (scanned PDFs can't be read).
   Speech translation  an audio or video file to subtitles in another
                       language, and optionally a dubbed soundtrack in the
                       speaker's (or each speaker's) own voice.

@@ -1,5 +1,6 @@
 // Unit tests for the parts that need no model: text helpers, document
 // layouts (txt / md / srt / docx) and language/model tables.
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -300,6 +301,10 @@ int main() {
     // ---- tables
     CHECK(find_language("pt_br") && find_language("pt_br")->code == "pt-BR");
     CHECK(find_language("zh-TW") && find_language("zh-TW")->code == "zh-Hant");
+    // The faster mode's helpers, and the 4-bit 12B that leaves room for one on 16 GB.
+    CHECK(find_draft_model("translategemma-4b") && find_draft_model("gemma-3-1b") && !find_draft_model("auto"));
+    CHECK(find_draft_model("gemma-3-1b")->bytes < 1200000000ull);
+    CHECK(find_model("translategemma-12b-q4") && find_model("translategemma-12b-q4")->family == Family::TranslateGemma);
     CHECK(model_supports(*find_model("translategemma-4b"), "de"));
     CHECK(!model_supports(*find_model("translategemma-4b"), "bo"));
     CHECK(model_supports(*find_model("hy-mt2-7b"), "bo"));
@@ -330,9 +335,30 @@ int main() {
         const std::vector<std::string> units = {"  First line.\nSecond line.  ", "Another paragraph."};
         // The batch fails twice, then each paragraph is redone on its own (and succeeds),
         // so one bad batch doesn't cost the paragraphs their translation.
+        std::vector<double> shares;  // set_fraction_progress, call by call
+        tr.set_fraction_progress([&](double f) { shares.push_back(f); });
         CHECK((tr.translate_units(units, nullptr) == std::vector<std::string>{"complete", "complete"}));
         CHECK(tr.stats().problems == 0);
         CHECK(stub_prompts().size() == 4);
+        // Progress: from 0, rising (also through the retries) and ending at 1, with
+        // steps while the "model" writes, not only when the piece is done.
+        CHECK(shares.size() > 2 && shares.front() == 0.0 && shares.back() == 1.0);
+        CHECK(std::is_sorted(shares.begin(), shares.end()) &&
+              std::adjacent_find(shares.begin(), shares.end()) == shares.end());
+        CHECK(std::count_if(shares.begin(), shares.end(), [](double f) { return f > 0 && f < 1; }) >= 2);
+        // Several pieces: each finished piece moves it on in proportion to its text.
+        {
+            reset_stub();
+            Translator many(llm, m, opts);
+            std::vector<std::string> paras;
+            for (int i = 0; i < 12; ++i) paras.push_back(std::string(1200, 'a' + i) + ".");
+            std::vector<double> f;
+            int pieces_reported = 0;
+            many.set_fraction_progress([&](double x) { f.push_back(x); });
+            many.translate_units(paras, [&](int, int) { ++pieces_reported; });
+            CHECK(pieces_reported > 1 && !f.empty() && f.back() == 1.0);
+            CHECK(std::is_sorted(f.begin(), f.end()));
+        }
         // Every attempt failing keeps the complete original text.
         reset_stub({truncated, looped, truncated, looped, truncated, looped});
         Translator failing(llm, m, opts);

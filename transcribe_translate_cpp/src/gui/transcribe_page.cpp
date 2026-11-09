@@ -1,4 +1,5 @@
 #include "transcribe_page.h"
+#include "pdf_files.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -74,60 +75,6 @@ const ModelChoice kModels[] = {
      "Very accurate; 14 languages. Choose the spoken language (it can't detect it). 30 s chunks."},
     {"parakeet-redux", "Parakeet Redux", "Small ternary Parakeet variant."},
 };
-
-// A PDF of one of the engine's text results (transcript, corrected copy or
-// summary): the title, the AI note in italics when the text starts with one
-// ("[Summary written by ...]"), then the paragraphs. Qt lays out the text with the
-// system's fonts (embedded in the PDF), so every script prints.
-bool writePdf(const QString& textPath, const QString& pdfPath, const QString& title, QString* error) {
-    QFile in(textPath);
-    if (!in.open(QIODevice::ReadOnly)) {
-        if (error) *error = in.errorString();
-        return false;
-    }
-    const QString text = QString::fromUtf8(in.readAll()).replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-    QStringList paragraphs;
-    for (const QString& p : text.split(QRegularExpression(QStringLiteral("\n\\s*\n"))))
-        if (!p.trimmed().isEmpty()) paragraphs << p.trimmed();
-    QString note;
-    if (!paragraphs.isEmpty() && paragraphs.first().startsWith(QLatin1Char('[')) &&
-        paragraphs.first().endsWith(QLatin1Char(']')))
-        note = paragraphs.takeFirst();
-
-    QString html = QStringLiteral("<h1>%1</h1>").arg(title.toHtmlEscaped());
-    if (!note.isEmpty())
-        html += QStringLiteral("<p style=\"color:#595959\"><i>%1</i></p>").arg(note.toHtmlEscaped());
-    for (const QString& p : paragraphs)
-        html += QStringLiteral("<p>%1</p>").arg(p.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")));
-
-    QSaveFile out(pdfPath);  // never a half-written PDF
-    if (!out.open(QIODevice::WriteOnly)) {
-        if (error) *error = out.errorString();
-        return false;
-    }
-    {
-        QPdfWriter pdf(&out);
-        pdf.setTitle(title);
-        pdf.setCreator(QStringLiteral("Transcribe"));
-        // Letter in the US and Canada, A4 elsewhere. QTextDocument::print adds 2 cm
-        // margins (and the page numbers) inside these 5 mm: 2.5 cm in all.
-        const QLocale::Country c = QLocale().territory();
-        const bool letter = c == QLocale::UnitedStates || c == QLocale::Canada;
-        pdf.setPageLayout(QPageLayout(QPageSize(letter ? QPageSize::Letter : QPageSize::A4), QPageLayout::Portrait,
-                                      QMarginsF(5, 5, 5, 5), QPageLayout::Millimeter));
-        QTextDocument doc;
-        QFont font = doc.defaultFont();
-        font.setPointSizeF(11);
-        doc.setDefaultFont(font);
-        doc.setHtml(html);
-        doc.print(&pdf);
-    }
-    if (!out.commit()) {
-        if (error) *error = out.errorString();
-        return false;
-    }
-    return true;
-}
 
 // "Auto-detect" first, then alphabetical.
 const std::pair<const char*, const char*> kLanguages[] = {
@@ -745,7 +692,7 @@ void TranscribePage::makePdfs() {
         if (name.endsWith(QLatin1String(".txt"), Qt::CaseInsensitive)) name.chop(4);
         const QString pdf = QDir(pdfDir_).filePath(name + QStringLiteral(".pdf"));
         QString error;
-        if (writePdf(copy, pdf, inputTitle_, &error)) {
+        if (tt::writeTextPdf(copy, pdf, inputTitle_, &error)) {
             written_ << QDir::toNativeSeparators(pdf);
             appendLog(QStringLiteral("  wrote %1\n").arg(QDir::toNativeSeparators(pdf)));
         } else {

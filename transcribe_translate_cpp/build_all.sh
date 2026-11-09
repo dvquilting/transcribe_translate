@@ -28,6 +28,9 @@ on()  { [[ "$1" == on || "$1" == ON || "$1" == 1 ]]; }
 CRISPASR_COMMIT=199de52d9068aeba366dd95d09a96bb45b2a7a14
 LLAMA_COMMIT=bd4eeaa047006cb1fe71999fbd11134b5836e167
 MINIZ_COMMIT=2948eebafc5b9f1c69bebed80333e403a09bd62d
+# PDFium, for reading PDFs: a prebuilt release of
+# https://github.com/bblanchon/pdfium-binaries (chromium/NNNN).
+PDFIUM_BUILD=8138
 CUDA_ARCHS="${CUDA_ARCHS:-75-virtual;86-real;89-real;120-real}"
 JOBS="${JOBS:-$(nproc)}"
 CUDA="${CUDA:-auto}"
@@ -80,6 +83,21 @@ mkdir -p third_party
 fetch CrispASR https://github.com/CrispStrobe/CrispASR "$CRISPASR_COMMIT"
 fetch llama.cpp https://github.com/ggml-org/llama.cpp "$LLAMA_COMMIT"
 fetch miniz https://github.com/richgel999/miniz "$MINIZ_COMMIT"
+fetch_pdfium() {
+    local dir="$ROOT/third_party/pdfium" arch
+    case "$(uname -m)" in
+        x86_64) arch=x64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) echo "[WARN] no PDFium build for $(uname -m): the program will not read PDFs"; return 0 ;;
+    esac
+    grep -qx "BUILD=$PDFIUM_BUILD" "$dir/VERSION" 2>/dev/null && [[ -f "$dir/lib/libpdfium.so" ]] && return 0
+    echo "[INFO] Downloading PDFium $PDFIUM_BUILD (for reading PDFs) ..."
+    command -v curl >/dev/null || die "curl not found (sudo apt install curl)"
+    rm -rf "$dir" && mkdir -p "$dir"
+    curl -fsSL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/$PDFIUM_BUILD/pdfium-linux-$arch.tgz" \
+        | tar -xz -C "$dir" && [[ -f "$dir/lib/libpdfium.so" ]] || { rm -rf "$dir"; die "downloading PDFium failed"; }
+}
+fetch_pdfium
 
 # ---- 2. the window and the tests -------------------------------------------------
 echo "[INFO] ===== the window (Qt) and the tests ====="
@@ -117,6 +135,14 @@ cp third_party/CrispASR/LICENSE dist/licenses/CrispASR-LICENSE.txt
 [[ -f third_party/CrispASR/THIRD_PARTY_NOTICES.txt ]] && cp third_party/CrispASR/THIRD_PARTY_NOTICES.txt dist/licenses/CrispASR-THIRD_PARTY_NOTICES.txt
 cp third_party/llama.cpp/LICENSE dist/licenses/llama.cpp-LICENSE.txt
 cp third_party/miniz/LICENSE dist/licenses/miniz-LICENSE.txt
+# PDFium: the window reads PDFs with it, from next to itself (it starts without it).
+if [[ -f third_party/pdfium/lib/libpdfium.so ]]; then
+    cp third_party/pdfium/lib/libpdfium.so dist/
+    cp third_party/pdfium/LICENSE dist/licenses/pdfium-binaries-LICENSE.txt
+    [[ -d third_party/pdfium/licenses ]] && cp -r third_party/pdfium/licenses dist/licenses/PDFium
+else
+    echo "[WARN] No PDFium: the program will not read PDFs"
+fi
 # The library's symbols stay its own (CrispASR in tt_engine has a ggml of the same names).
 if command -v nm >/dev/null && nm -D --defined-only dist/libtt_translate.so | grep -qE ' T (ggml_|llama_)'; then
     die "libtt_translate.so exports ggml/llama symbols"

@@ -360,6 +360,20 @@ Translator::Result Translator::run(const std::string& text, const std::string& c
     const int src_reps = source_repetitions(text);
     const int allowed = src_reps >= 3 ? src_reps + 1 : 0;
 
+    // Progress while the model writes: its output so far against the source's
+    // length (translations run about as long, give or take a language).
+    struct TokenProgress {
+        Llm& llm;
+        ~TokenProgress() { llm.set_token_callback(nullptr); }
+    } token_progress{llm_};
+    if (fraction_) {
+        const double w = tok->text;
+        llm_.set_token_callback([this, w](int n) {
+            const double f = std::min(0.95, n / std::max(8.0, w * 1.15));
+            report(done_w_ + std::min(piece_w_, piece_done_w_ + w * f));
+        });
+    }
+
     Sampling greedy;
     if (model_.family == Family::HyMT) greedy.repeat_penalty = 1.05f;  // Tencent's recommendation
     Generation g = llm_.generate(prompt, prompts_.add_bos(), max_tokens, greedy, allowed, &tok->prompt);
@@ -370,7 +384,10 @@ Translator::Result Translator::run(const std::string& text, const std::string& c
     stats_.prompt_tokens += g.prompt_tokens;
     stats_.generated_tokens += g.generated_tokens;
     std::string out = clean_output(g.text, text);
-    if (!out.empty() && !g.looped && !g.truncated) return {out, true};
+    if (!out.empty() && !g.looped && !g.truncated) {
+        piece_done_w_ += tok->text;
+        return {out, true};
+    }
 
     // Second attempt with a little randomness, which usually breaks a loop.
     // (The same prompt tokens: generate() keeps the prompt in the KV cache.)
@@ -383,6 +400,7 @@ Translator::Result Translator::run(const std::string& text, const std::string& c
     stats_.prompt_tokens += g2.prompt_tokens;
     stats_.generated_tokens += g2.generated_tokens;
     std::string out2 = clean_output(g2.text, text);
+    piece_done_w_ += tok->text;
     if (!out2.empty() && !g2.looped && !g2.truncated) return {out2, true};
     return {text, false};  // Both attempts failed: preserve the complete source verbatim.
 }
@@ -481,6 +499,7 @@ std::vector<std::string> Translator::translate_units(const std::vector<std::stri
     struct Piece {
         std::vector<size_t> idx;
         bool long_unit = false;
+        int tokens = 0;  // of the source text (for progress)
     };
     std::vector<Piece> pieces;
     Piece cur;
@@ -493,11 +512,12 @@ std::vector<std::string> Translator::translate_units(const std::vector<std::stri
         const int t = tokens(units[i]);
         if (t > model_.chunk_tokens) {
             if (!cur.idx.empty()) pieces.push_back(cur), cur = {}, cur_tokens = 0;
-            pieces.push_back({{i}, true});
+            pieces.push_back({{i}, true, t});
             continue;
         }
         if (!cur.idx.empty() && cur_tokens + t > model_.chunk_tokens) pieces.push_back(cur), cur = {}, cur_tokens = 0;
         cur.idx.push_back(i);
+        cur.tokens += t;
         cur_tokens += t + 2;
     }
     if (!cur.idx.empty()) pieces.push_back(cur);
@@ -511,8 +531,22 @@ std::vector<std::string> Translator::translate_units(const std::vector<std::stri
     std::string context;
     auto tail = [](const std::string& s) { return tail_at_word(s, 800); };  // last ~800 bytes, from a word
 
+    total_w_ = 0;
+    for (const Piece& piece : pieces) total_w_ += piece.tokens;
+    done_w_ = piece_w_ = piece_done_w_ = 0;
+    reported_ = -1;
+    report(0);
+    auto piece_finished = [&](size_t p) {
+        done_w_ += piece_w_;
+        piece_w_ = piece_done_w_ = 0;
+        report(done_w_);
+        if (progress) progress((int)p + 1, (int)pieces.size());
+    };
+
     for (size_t p = 0; p < pieces.size(); ++p) {
         const Piece& piece = pieces[p];
+        piece_w_ = piece.tokens;
+        piece_done_w_ = 0;
         if (piece.long_unit) {
             const size_t i = piece.idx[0];
             Result r = translate_long_unit(units[i], want_context ? context : "");
@@ -531,7 +565,7 @@ std::vector<std::string> Translator::translate_units(const std::vector<std::stri
                     if (unit_done) unit_done(i, result[i]);
                     if (want_context) context = tail(units[i]);
                 }
-                if (progress) progress((int)p + 1, (int)pieces.size());
+                piece_finished(p);
                 continue;
             }
             Result r = run(joined, want_context ? context : "", &tok);
@@ -570,9 +604,18 @@ std::vector<std::string> Translator::translate_units(const std::vector<std::stri
             for (size_t i : piece.idx) src += (src.empty() ? "" : "\n\n") + units[i];
             context = tail(src);
         }
-        if (progress) progress((int)p + 1, (int)pieces.size());
+        piece_finished(p);
     }
+    report(total_w_);
     return result;
+}
+
+void Translator::report(double weight_done) {
+    if (!fraction_) return;
+    const double f = total_w_ > 0 ? std::clamp(weight_done / total_w_, 0.0, 1.0) : 1.0;
+    if (f <= reported_) return;  // never backwards (a retried piece writes again)
+    reported_ = f;
+    fraction_(f);
 }
 
 }  // namespace tl

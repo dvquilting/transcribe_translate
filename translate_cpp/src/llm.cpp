@@ -154,7 +154,13 @@ Llm::Llm(const std::string& model_path, const EngineOptions& opts, std::string* 
     cp.n_ubatch = 512;
     const int threads = opts.threads > 0 ? opts.threads : default_threads();
     cp.n_threads = threads;
+#ifdef __ANDROID__
+    // A phone: every core but the fast ones is a slow "little" core, which would
+    // hold the others up in the prompt's evenly split work (see cpu_cores.h).
+    cp.n_threads_batch = threads;
+#else
     cp.n_threads_batch = devs.empty() ? (int)std::max(1u, std::thread::hardware_concurrency()) : threads;
+#endif
     cp.no_perf = true;
 
     // Fit the weights + KV cache into free GPU memory: when the model is too big,

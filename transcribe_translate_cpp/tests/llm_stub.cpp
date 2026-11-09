@@ -39,6 +39,7 @@ int stub_prompt_tokenizations() { return tokenizations; }
 int stub_prompt_decodes() { return decodes; }
 std::string describe_engine(const EngineInfo&) { return "test model"; }
 int default_threads() { return 1; }
+uint64_t gpu_free_memory(const std::string&) { return 0; }
 Llm::Llm(const std::string&, const EngineOptions& opts, std::string*) : n_ctx_(opts.n_ctx) {}
 Llm::~Llm() = default;
 int Llm::count_tokens(const std::string& text) const { return (int)(text.size() + 3) / 4; }
@@ -61,6 +62,7 @@ Generation Llm::generate(const Prompt& p, bool bos, int max_tokens, const Sampli
     kv = toks;
     prompts.push_back(p);
     allowed.push_back(allowed_repeats);
+    if (on_token_) on_token_(1), on_token_(2);  // as if two tokens were written
     if (std::getenv("TRANSLATE_TEST_INCOMPLETE")) {
         Generation failed; failed.text = "INCOMPLETE"; failed.truncated = true;
         return failed;

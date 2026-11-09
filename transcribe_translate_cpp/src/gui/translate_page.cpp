@@ -1,4 +1,6 @@
 #include "translate_page.h"
+#include "faster_mode.h"
+#include "pdf_files.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -33,6 +35,7 @@
 #include <QTemporaryDir>
 #include <QTextCursor>
 #include <QTimer>
+#include <QtMath>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -54,8 +57,8 @@ QString absolutePath(QString path) {
 
 
 const char* kFileFilter =
-    "Documents (*.txt *.md *.markdown *.srt *.docx);;Text (*.txt);;Markdown (*.md *.markdown);;"
-    "Subtitles (*.srt);;Word (*.docx);;All files (*)";
+    "Documents (*.txt *.md *.markdown *.srt *.docx *.pdf);;Text (*.txt);;Markdown (*.md *.markdown);;"
+    "Subtitles (*.srt);;Word (*.docx);;PDF (*.pdf);;All files (*)";
 
 QString q(const std::string& s) { return QString::fromUtf8(s.c_str()); }
 
@@ -95,6 +98,13 @@ QString TranslatePage::helpHtml() {
         "another name.</p>"
         "<p>If a few pieces can't be translated, the file is still saved with those pieces in the original "
         "language, and the log says which.</p>"
+        "<p><b>PDF</b> files are translated into a new PDF (report.pdf becomes report.de.pdf). A PDF stores "
+        "positioned text rather than paragraphs, so the text is read page by page and rebuilt into headings and "
+        "paragraphs in reading order; the translation is then laid out afresh on pages of the same size, with "
+        "the page breaks between paragraphs kept. Columns, images, tables and the exact positions are not kept. "
+        "Page numbers and running headers are left out. A scanned PDF (pages that are only pictures) has no "
+        "text to read and can't be translated. Text (.txt) and Markdown (.md) files can also be saved as PDF: "
+        "choose an output file ending in .pdf.</p>"
 
         "<h3>Advanced</h3>"
         "<ul>"
@@ -103,6 +113,17 @@ QString TranslatePage::helpHtml() {
         "on the processor, which is slower. <b>CPU threads</b> limits the processor threads used.</li>"
         "<li><b>Show the model the preceding text</b> (Hy-MT2 and Qwen) helps with names, pronouns and "
         "consistent terms.</li>"
+        "<li><b>Faster mode</b> (TranslateGemma 12B and 27B; speculative decoding): a small helper model guesses "
+        "a few words ahead and the large model checks all of them in one step, keeping only the words it would "
+        "have written itself. The translation is the same, sooner. It times the steps as it goes and drafts only "
+        "as far ahead as pays off (not at all where the guesses are mostly wrong), so it is not slower than "
+        "without it. Both models must fit on the graphics card. <i>TranslateGemma 4B</i> (2.5 GB) guesses best; "
+        "<i>Gemma 3 1B</i> (1.1 GB) guesses less well but is small enough to fit beside 12B on a 16 GB card. "
+        "<i>The best helper that fits</i> takes 4B when there is room, else 1B. Another way on a 16 GB card: "
+        "<b>TranslateGemma 12B (smaller)</b>, a 7.3 GB file of the same model (slightly lower quality), with room "
+        "for the 4B helper. 27B with a helper needs about 24 GB. The helper is downloaded the first time. Next "
+        "to <b>Compute</b> the tab shows whether the faster mode is on (or why not) and, at the end, the speed it "
+        "gave; the log has the details.</li>"
         "<li><b>Model file override</b> and <b>Models folder</b> use your own model file or another download "
         "folder.</li>"
         "</ul>"
@@ -254,7 +275,7 @@ void TranslatePage::buildUi() {
     auto* fv = new QVBoxLayout(fileTab);
     auto* ff = new QFormLayout;
     inputEdit_ = new QLineEdit;
-    inputEdit_->setPlaceholderText(tr("A .txt, .md, .srt or .docx file"));
+    inputEdit_->setPlaceholderText(tr("A .txt, .md, .srt, .docx or .pdf file"));
     auto* bi = new QPushButton(tr("Browse..."));
     connect(bi, &QPushButton::clicked, this, &TranslatePage::browseInput);
     ff->addRow(tr("Input file:"), row(inputEdit_, bi));
@@ -267,7 +288,8 @@ void TranslatePage::buildUi() {
     auto* note = new QLabel(
         tr("Text and Markdown keep their layout; code blocks are not translated. Subtitles keep their timing. "
            "Word documents keep paragraph styles, tables, headers and footers, but formatting that changes "
-           "inside a paragraph (a single bold word, say) is not kept."));
+           "inside a paragraph (a single bold word, say) is not kept. PDFs are rebuilt as headings and "
+           "paragraphs on new pages (columns, images and exact positions are not kept)."));
     note->setWordWrap(true);
     note->setStyleSheet(QStringLiteral("color: gray;"));
     fv->addWidget(note);
@@ -312,6 +334,8 @@ void TranslatePage::buildUi() {
     contextCheck_->setToolTip(tr("Helps with pronouns and terminology across paragraphs. TranslateGemma has no "
                                  "place for it in its prompt."));
     af->addRow(QString(), contextCheck_);
+    draftCombo_ = tt::makeFasterModeCombo();
+    af->addRow(tr("Faster mode:"), draftCombo_);
     modelFileEdit_ = new QLineEdit;
     modelFileEdit_->setPlaceholderText(tr("(download the selected model)"));
     auto* bm = new QPushButton(tr("Browse..."));
@@ -400,6 +424,7 @@ void TranslatePage::updateModelInfo() {
     langNote_->setText(notes.join(QLatin1Char(' ')));
     langNote_->setVisible(!notes.isEmpty());
     contextCheck_->setEnabled(m->family != tl::Family::TranslateGemma);
+    draftCombo_->setEnabled(tt::fasterModeApplies(m));
 }
 
 void TranslatePage::swapLanguages() {
@@ -425,6 +450,10 @@ QStringList TranslatePage::commonArguments() const {
     if (deviceCombo_->currentText() != QLatin1String("auto")) a << QStringLiteral("--device") << deviceCombo_->currentText();
     if (threadsSpin_->value() > 0) a << QStringLiteral("--threads") << QString::number(threadsSpin_->value());
     if (!contextCheck_->isChecked()) a << QStringLiteral("--no-context");
+    // (isEnabled() would also be false while a job runs and the form is locked.)
+    const tl::ModelInfo* m = tl::find_model(modelCombo_->currentData().toString().toStdString());
+    const QString draft = draftCombo_->currentData().toString();
+    if (tt::fasterModeApplies(m) && draft != QLatin1String("off")) a << QStringLiteral("--draft") << draft;
     if (!modelFileEdit_->text().trimmed().isEmpty()) a << QStringLiteral("--model-file") << absolutePath(modelFileEdit_->text());
     if (!modelsDirEdit_->text().trimmed().isEmpty()) a << QStringLiteral("--models-dir") << absolutePath(modelsDirEdit_->text());
     return a;
@@ -538,9 +567,108 @@ void TranslatePage::translateFile() {
         QMessageBox::warning(this, tr("Translate"), tr("The output file must be different from the input file."));
         return;
     }
-    QStringList args{in, QStringLiteral("-o"), out};
+    // PDFs: the engine translates Markdown (from a PDF) or the text file, into the
+    // temporary folder; finishPdf() makes the PDF from that.
+    const QString inExt = QFileInfo(in).suffix().toLower(), outExt = QFileInfo(out).suffix().toLower();
+    const bool pdfIn = inExt == QLatin1String("pdf"), pdfOut = outExt == QLatin1String("pdf");
+    const bool markdown = inExt == QLatin1String("md") || inExt == QLatin1String("markdown");
+    if (pdfIn && !pdfOut) {
+        QMessageBox::warning(this, tr("Translate"), tr("A PDF is translated into a PDF: choose an output file ending in .pdf."));
+        return;
+    }
+    if (pdfOut && !pdfIn && !markdown && inExt != QLatin1String("txt")) {
+        QMessageBox::warning(this, tr("Translate"),
+                             tr("Only PDF, text (.txt) and Markdown (.md) files can be saved as PDF. "
+                                "Save a Word document as .docx, or subtitles as .srt."));
+        return;
+    }
+    pdfFrom_ = PdfFrom::None;
+    QString engineIn = in, engineOut = out;
+    QStringList notes;
+    if (pdfOut) {
+        delete tempDir_;
+        tempDir_ = new QTemporaryDir;
+        if (!tempDir_->isValid()) {
+            QMessageBox::critical(this, tr("Translate"), tr("Could not create a temporary folder."));
+            return;
+        }
+        pdfOutput_ = out;
+        pdfTitle_ = QFileInfo(out).completeBaseName();
+        if (pdfIn) {
+            statusLabel_->setText(tr("Reading the PDF..."));
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            const tt::PdfReadResult r = tt::readPdf(in);
+            QApplication::restoreOverrideCursor();
+            if (!r.ok) {
+                statusLabel_->setText(tr("Could not read the PDF."));
+                QMessageBox::warning(this, tr("Translate"),
+                                     tr("Could not read %1:\n\n%2").arg(QFileInfo(in).fileName(), r.error));
+                return;
+            }
+            if (!r.doc.title.isEmpty()) pdfTitle_ = r.doc.title;
+            if (!r.emptyPages.isEmpty()) {
+                QStringList pages;
+                for (int p : r.emptyPages) pages << QString::number(p);
+                notes << tr("Note: page(s) %1 of %2 have no text (pictures only?) and are left out.")
+                             .arg(pages.join(QStringLiteral(", ")))
+                             .arg(r.pages);
+            }
+            notes << tr("PDF: %1 pages, %2 headings and paragraphs").arg(r.pages).arg([&] {
+                int n = 0;
+                for (const auto& b : r.doc.blocks) n += b.kind != tt::PdfBlock::PageBreak;
+                return n;
+            }());
+            engineIn = tempDir_->filePath(QStringLiteral("source.md"));
+            QFile f(engineIn);
+            if (!f.open(QIODevice::WriteOnly) || f.write(tt::pdfToMarkdown(r.doc).toUtf8()) < 0) {
+                QMessageBox::critical(this, tr("Translate"), tr("Could not write a temporary file."));
+                return;
+            }
+            f.close();
+            engineOut = tempDir_->filePath(QStringLiteral("translated.md"));
+            pdfFrom_ = PdfFrom::Pdf;
+        } else {
+            engineOut = tempDir_->filePath(QStringLiteral("translated.") + (markdown ? QStringLiteral("md") : inExt));
+            pdfFrom_ = markdown ? PdfFrom::Markdown : PdfFrom::Text;
+        }
+        pdfEngineOutput_ = engineOut;
+    }
+    QStringList args{engineIn, QStringLiteral("-o"), engineOut};
     args << commonArguments();
-    startProcess(args, Mode::File);
+    if (startProcess(args, Mode::File)) {
+        runInput_ = in;  // the user's file, not the temporary Markdown (History)
+        for (const QString& n : notes) appendLog(n + QLatin1Char('\n'));
+    } else {
+        pdfFrom_ = PdfFrom::None;
+    }
+}
+
+bool TranslatePage::finishPdf() {
+    QFile f(pdfEngineOutput_);
+    if (!f.open(QIODevice::ReadOnly)) {
+        lastError_ = tr("the translation was not written (%1)").arg(f.errorString());
+        return false;
+    }
+    const QString text = QString::fromUtf8(f.readAll());
+    tt::PdfDocument doc;
+    if (pdfFrom_ == PdfFrom::Pdf) {
+        doc = tt::pdfFromMarkdown(text);
+    } else if (pdfFrom_ == PdfFrom::Markdown) {
+        doc.markdown = text;
+    } else {
+        doc = tt::pdfFromText(text);
+    }
+    doc.title = pdfTitle_;
+    doc.language = toCombo_->currentData().toString();
+    QString error;
+    if (!tt::writePdf(doc, pdfOutput_, &error)) {
+        lastError_ = tr("could not write %1: %2").arg(QFileInfo(pdfOutput_).fileName(), error);
+        appendLog(QStringLiteral("\nError: ") + lastError_ + QLatin1Char('\n'));
+        return false;
+    }
+    written_ = QDir::toNativeSeparators(pdfOutput_);
+    appendLog(QStringLiteral("  wrote %1\n").arg(written_));
+    return true;
 }
 
 // ------------------------------------------------------------------ running
@@ -556,6 +684,8 @@ bool TranslatePage::startProcess(const QStringList& args, Mode mode) {
     runInput_ = mode == Mode::File ? args.value(0) : QString();
     written_.clear();
     lastError_.clear();
+    draftNote_.clear();
+    engineHtml_.clear();
     downloading_ = false;
     resetTiming();
     logView_->clear();
@@ -578,6 +708,7 @@ void TranslatePage::setRunning(bool running) {
     translateFileBtn_->setEnabled(!running);
     cancelBtn_->setEnabled(running);
     modelCombo_->setEnabled(!running);
+    progress_->setTextVisible(false);  // the percentage shows while translating
     if (running) {
         openFolderBtn_->setEnabled(false);
         progress_->setRange(0, 0);
@@ -604,17 +735,33 @@ void TranslatePage::parseLine(const QString& line) {
     static const QRegularExpression progressRe(QStringLiteral("^progress: (\\w+) (\\d+)/(\\d+) (\\w+)"));
     if (const auto m = progressRe.match(line); m.hasMatch()) {
         const qint64 done = m.captured(2).toLongLong(), total = m.captured(3).toLongLong();
-        progress_->setRange(0, (int)std::max<qint64>(total, 1));
-        progress_->setValue((int)done);
-        if (m.captured(1) == QLatin1String("download")) {
+        const QString phase = m.captured(1);
+        if (phase == QLatin1String("translating")) {  // the share done, as the model writes
+            fraction_ = total > 0 ? (double)done / (double)total : 0.0;
+            progress_->setRange(0, 1000);
+            progress_->setValue(qRound(fraction_ * 1000));
+            progress_->setFormat(QStringLiteral("%1%").arg(qFloor(fraction_ * 100)));
+            progress_->setTextVisible(true);
+            showTranslating();
+            return;
+        }
+        if (phase == QLatin1String("download")) {
+            progress_->setRange(0, (int)std::max<qint64>(total, 1));
+            progress_->setValue((int)done);
+            progress_->setTextVisible(false);
             downloading_ = true;
             statusLabel_->setText(tr("Downloading the model (first use only): %1 of %2 GB")
                                       .arg(done / 1000.0, 0, 'f', 1)
                                       .arg(total / 1000.0, 0, 'f', 1));
         } else {
+            // A piece finished (the bar follows "translating").
             piecesDone_ = (int)done;
             piecesTotal_ = (int)total;
-            statusLabel_->setText(tr("Translating: part %1 of %2").arg(done).arg(total));
+            if (fraction_ < 0) {  // an engine without "translating" lines
+                progress_->setRange(0, (int)std::max<qint64>(total, 1));
+                progress_->setValue((int)done);
+            }
+            showTranslating();
             reloadPartial();
         }
         return;
@@ -629,6 +776,14 @@ void TranslatePage::parseLine(const QString& line) {
         translateStartMs_ = clock_.elapsed();  // model loaded: translation starts now
         updateTiming();
     }
+    // The faster mode (speculative decoding): on, off and why, and what it gave.
+    static const QRegularExpression draftOnRe(QStringLiteral("^Draft : \\S+ \\(speculative"));
+    static const QRegularExpression draftOffRe(QStringLiteral("^Note: (?:draft model not used: |draft model |no draft model - )(.*)$"));
+    static const QRegularExpression draftGainRe(QStringLiteral("^Draft : drafted in .*\\(([0-9.]+)x\\)"));
+    if (draftOnRe.match(line).hasMatch()) setDraftNote(tr("faster mode on"));
+    else if (const auto m = draftOffRe.match(line); m.hasMatch()) setDraftNote(tr("faster mode off: %1").arg(m.captured(1)));
+    else if (const auto m2 = draftGainRe.match(line); m2.hasMatch())
+        setDraftNote(tr("faster mode: %1x the speed").arg(QLocale().toString(m2.captured(1).toDouble(), 'f', 2)));
     static const QRegularExpression engineRe(QStringLiteral("^Engine: (\\S+)(?: \\((.*)\\))?\\s*$"));
     if (const auto m = engineRe.match(line); m.hasMatch()) {
         setEngine(m.captured(1), m.captured(2));
@@ -661,14 +816,30 @@ void TranslatePage::parseLine(const QString& line) {
         s.startsWith(QLatin1String("Translating")) || s.startsWith(QLatin1String("Note:")) ||
         s.startsWith(QLatin1String("Placement:"))) {
         statusLabel_->setText(s);
-        if (s.startsWith(QLatin1String("Loading"))) progress_->setRange(0, 0);
+        if (s.startsWith(QLatin1String("Loading"))) {
+            progress_->setTextVisible(false);
+            progress_->setRange(0, 0);
+        }
     }
+}
+
+void TranslatePage::showTranslating() {
+    QString s = fraction_ >= 0 ? tr("Translating: %1%").arg(qFloor(fraction_ * 100)) : tr("Translating");
+    if (piecesTotal_ > 1)
+        s += QStringLiteral(" ") + tr("(part %1 of %2)").arg(std::min(piecesDone_ + 1, piecesTotal_)).arg(piecesTotal_);
+    statusLabel_->setText(s);
 }
 
 // The output has been read to the end (the last line too) when this runs.
 void TranslatePage::processFinished(int exitCode, bool cancelled) {
     tt::JobGate::instance().release();
     tick_->stop();
+    // The PDF, also from a partial translation (exit code 3).
+    if (mode_ == Mode::File && pdfFrom_ != PdfFrom::None) {
+        written_.clear();  // the engine wrote the temporary file
+        if (!cancelled && (exitCode == 0 || exitCode == 3) && !finishPdf()) exitCode = 1;
+        pdfFrom_ = PdfFrom::None;
+    }
     finished_ = true;
     updateTiming();
     if (cancelled || exitCode != 0) {
@@ -725,9 +896,17 @@ void TranslatePage::setEngine(const QString& backend, const QString& detail) {
                    QStringLiteral(" <span style=\"background:%1; color:white;\">&nbsp;<b>%2</b>&nbsp;</span>")
                        .arg(colour, backend.toHtmlEscaped());
     if (!detail.isEmpty()) html += QStringLiteral(" ") + detail.toHtmlEscaped();
-    engineLabel_->setText(html);
+    engineHtml_ = html;
+    engineLabel_->setText(draftNote_.isEmpty() ? html
+                                               : html + QStringLiteral(" &nbsp;\u00B7&nbsp; ") + draftNote_.toHtmlEscaped());
     settings_.setValue(QStringLiteral("lastEngine"), backend);
     settings_.setValue(QStringLiteral("lastEngineDetail"), detail);
+}
+
+void TranslatePage::setDraftNote(const QString& note) {
+    draftNote_ = note;  // also when it comes before the Engine line (a note from before loading)
+    if (!engineHtml_.isEmpty())
+        engineLabel_->setText(engineHtml_ + QStringLiteral(" &nbsp;\u00B7&nbsp; ") + note.toHtmlEscaped());
 }
 
 void TranslatePage::resetTiming() {
@@ -735,6 +914,7 @@ void TranslatePage::resetTiming() {
     translateSeconds_ = -1;
     words_ = -1;
     piecesDone_ = piecesTotal_ = 0;
+    fraction_ = -1;
     finished_ = false;
     for (QLineEdit* e : {wordsEdit_, loadEdit_, translateEdit_, speedEdit_, totalEdit_})
         e->setText(QStringLiteral("\u2014"));
@@ -751,9 +931,10 @@ void TranslatePage::updateTiming() {
     loadEdit_->setText(formatDuration(translateStartMs_ / 1000.0));
     const double translating = translateSeconds_ >= 0 ? translateSeconds_ : now - translateStartMs_ / 1000.0;
     translateEdit_->setText(formatDuration(translating));
-    // While running: estimate from the share of pieces done (pieces are of similar size).
-    if (translateSeconds_ < 0 && !finished_ && words_ > 0 && piecesTotal_ > 0 && piecesDone_ > 0 && translating > 0.5) {
-        const double wpm = words_ * (double)piecesDone_ / piecesTotal_ * 60.0 / translating;
+    // While running: estimate from the share translated so far.
+    const double share = fraction_ >= 0 ? fraction_ : piecesTotal_ > 0 ? (double)piecesDone_ / piecesTotal_ : 0.0;
+    if (translateSeconds_ < 0 && !finished_ && words_ > 0 && share > 0.02 && translating > 0.5) {
+        const double wpm = words_ * share * 60.0 / translating;
         speedEdit_->setText(tr("\u2248 %1 words/min").arg(QLocale().toString(qRound(wpm))));
     }
 }
@@ -785,6 +966,7 @@ void TranslatePage::loadSettings() {
     deviceCombo_->setCurrentText(s.value(QStringLiteral("device"), QStringLiteral("auto")).toString());
     threadsSpin_->setValue(s.value(QStringLiteral("threads"), 0).toInt());
     contextCheck_->setChecked(s.value(QStringLiteral("context"), true).toBool());
+    tt::selectFasterMode(draftCombo_, tt::loadFasterMode(s));
     modelsDirEdit_->setText(s.value(QStringLiteral("modelsDir")).toString());
     const QString last = s.value(QStringLiteral("lastEngine")).toString();
     if (last.isEmpty()) engineLabel_->setText(tr("Compute: <i>shown when a translation starts</i>"));
@@ -802,6 +984,7 @@ void TranslatePage::saveSettings() {
     s.setValue(QStringLiteral("device"), deviceCombo_->currentText());
     s.setValue(QStringLiteral("threads"), threadsSpin_->value());
     s.setValue(QStringLiteral("context"), contextCheck_->isChecked());
+    s.setValue(QStringLiteral("draftModel"), draftCombo_->currentData());
     s.setValue(QStringLiteral("modelsDir"), modelsDirEdit_->text());
 }
 

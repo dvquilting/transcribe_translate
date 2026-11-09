@@ -32,6 +32,13 @@ const std::vector<ModelInfo>& model_table();
 const std::vector<ModelInfo>& phone_model_table();
 const ModelInfo* find_phone_model(const std::string& key);
 const ModelInfo* find_model(const std::string& key);
+
+// Draft ("helper") models for TranslateGemma's faster mode (speculative
+// decoding, --draft): "translategemma-4b" (Q4_K_M, the better guesser) and
+// "gemma-3-1b" (Gemma 3 1B instruct, small enough to fit beside TranslateGemma
+// 12B on a 16 GB card). Both share TranslateGemma's vocabulary.
+const std::vector<ModelInfo>& draft_model_table();
+const ModelInfo* find_draft_model(const std::string& key);
 const ModelInfo& default_model();
 
 // True if the model was trained on this language (Qwen: always).

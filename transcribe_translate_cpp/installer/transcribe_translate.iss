@@ -172,6 +172,9 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.srt\shell\Transcrib
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.docx\shell\TranscribeTranslateText"; ValueType: string; ValueData: "Translate..."; Tasks: contextmenu; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.docx\shell\TranscribeTranslateText"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\transcribe_translate.exe"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.docx\shell\TranscribeTranslateText\command"; ValueType: string; ValueData: """{app}\transcribe_translate.exe"" --translate ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.pdf\shell\TranscribeTranslateText"; ValueType: string; ValueData: "Translate..."; Tasks: contextmenu; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.pdf\shell\TranscribeTranslateText"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\transcribe_translate.exe"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.pdf\shell\TranscribeTranslateText\command"; ValueType: string; ValueData: """{app}\transcribe_translate.exe"" --translate ""%1"""; Tasks: contextmenu
 ; Window settings saved by the program; removed on uninstall.
 Root: HKCU; Subkey: "Software\DavidV"; Flags: uninsdeletekeyifempty
 Root: HKCU; Subkey: "Software\DavidV\TranscribeTranslate"; Flags: uninsdeletekey

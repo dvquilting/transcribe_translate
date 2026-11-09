@@ -7,6 +7,9 @@ Included software:
   CrispASR (speech) ............ MIT licence
   llama.cpp and ggml ........... MIT licence (Georgi Gerganov and contributors)
   miniz ........................ MIT licence
+  PDFium (reading PDFs) ........ BSD 3-clause licence (The PDFium Authors);
+                                 the licences of its parts are in
+                                 licenses\PDFium
   Qt 6 ......................... LGPL v3 (The Qt Company); the Qt libraries are
                                  separate DLLs that you may replace
   NVIDIA cuBLAS (optional) ..... NVIDIA CUDA Toolkit EULA (redistributable

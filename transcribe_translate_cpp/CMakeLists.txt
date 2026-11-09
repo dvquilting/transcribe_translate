@@ -56,9 +56,24 @@ set(TT_GUI_SOURCES
     src/gui/jobgate.cpp src/gui/jobgate.h
     src/gui/help.cpp src/gui/help.h
     src/gui/subtitles.cpp src/gui/subtitles.h
+    src/gui/pdf_files.cpp src/gui/pdf_files.h src/gui/faster_mode.h
     ${TT_ROOT}/src/translate/models_help.cpp
     ${TT_TRANSLATE_CORE_SOURCES} ${TT_COMMON_SOURCES} ${TT_QT_SOURCES})
 set(TT_GUI_INCLUDES src/gui src/qt src/common src/translate)
+
+# PDFium (prebuilt, https://github.com/bblanchon/pdfium-binaries; build_all
+# downloads it): the window loads it to read PDFs, from next to itself.
+set(TT_PDFIUM_DIR "${TT_ROOT}/third_party/pdfium" CACHE PATH "PDFium binaries (pdfium-binaries layout)")
+if(WIN32)
+    set(TT_PDFIUM_LIB "${TT_PDFIUM_DIR}/bin/pdfium.dll")
+elseif(APPLE)
+    set(TT_PDFIUM_LIB "${TT_PDFIUM_DIR}/lib/libpdfium.dylib")
+else()
+    set(TT_PDFIUM_LIB "${TT_PDFIUM_DIR}/lib/libpdfium.so")
+endif()
+if(NOT EXISTS "${TT_PDFIUM_LIB}")
+    message(WARNING "${TT_PDFIUM_LIB} not found: the window will not read PDFs (build_all downloads PDFium)")
+endif()
 
 if(TT_BUILD_GUI AND Qt6_FOUND)
     set(_src src/gui/main.cpp ${TT_GUI_SOURCES})
@@ -71,6 +86,11 @@ if(TT_BUILD_GUI AND Qt6_FOUND)
     target_include_directories(transcribe_translate PRIVATE ${TT_GUI_INCLUDES})
     target_link_libraries(transcribe_translate PRIVATE Qt6::Widgets)
     tt_options(transcribe_translate)
+    if(EXISTS "${TT_PDFIUM_LIB}")
+        add_custom_command(TARGET transcribe_translate POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TT_PDFIUM_LIB}" "$<TARGET_FILE_DIR:transcribe_translate>"
+            COMMENT "Copying PDFium next to transcribe_translate")
+    endif()
     if(WIN32)
         get_target_property(_qmake Qt6::qmake IMPORTED_LOCATION)
         get_filename_component(_qtbin "${_qmake}" DIRECTORY)
@@ -157,7 +177,17 @@ if(TT_BUILD_TESTS)
     if(Qt6_FOUND)
         get_target_property(_test_qmake Qt6::qmake IMPORTED_LOCATION)
         get_filename_component(_test_qtbin "${_test_qmake}" DIRECTORY)
-        set(_offscreen "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_test_qtbin}/../plugins")
+        set(_offscreen "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${_test_qtbin}/../plugins;TT_PDFIUM=${TT_PDFIUM_LIB}")
+        if(WIN32)
+            # The offscreen platform looks for fonts in Qt's own lib/fonts, which Qt no
+            # longer ships: give it Windows' fonts, or the PDFs written in the tests have
+            # no text (the program itself uses the Windows platform and its fonts).
+            file(TO_CMAKE_PATH "$ENV{SystemRoot}/Fonts" _winfonts)
+            if(NOT EXISTS "${_winfonts}")
+                set(_winfonts "C:/Windows/Fonts")
+            endif()
+            list(APPEND _offscreen "QT_QPA_FONTDIR=${_winfonts}")
+        endif()
 
         add_executable(tt_child_process_tests tests/test_child_process.cpp src/qt/child_process.cpp
             src/qt/child_process.h src/qt/process_tree.h)
@@ -174,6 +204,14 @@ if(TT_BUILD_TESTS)
         tt_options(tt_models_tests)
         add_test(NAME model_files COMMAND tt_models_tests)
         set_tests_properties(model_files PROPERTIES ENVIRONMENT "${_offscreen}")
+
+        # PDFs: writing, reading back (with PDFium), the Markdown the engine translates.
+        add_executable(tt_pdf_tests tests/test_pdf.cpp src/gui/pdf_files.cpp)
+        target_include_directories(tt_pdf_tests PRIVATE src/gui)
+        target_link_libraries(tt_pdf_tests PRIVATE Qt6::Gui)
+        tt_options(tt_pdf_tests)
+        add_test(NAME pdf COMMAND tt_pdf_tests)
+        set_tests_properties(pdf PROPERTIES ENVIRONMENT "${_offscreen}")
 
         # The window: tabs, job gate, history, the engine command lines (with a
         # stand-in engine, tests/fake_engine.cpp).

@@ -3,10 +3,12 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "cpu_cores.h"
 #include "docx_writer.h"
 #include "fileio.h"
 #include "model_catalog.h"
@@ -225,8 +227,32 @@ static void test_docx() {
     CHECK(d.compare(d.size() - 22, 4, "PK\x05\x06") == 0);  // the end of the zip
 }
 
+// A Galaxy S23's cores (Snapdragon 8 Gen 2): 3 little, 4 middle, 1 prime.
+void test_cpu_cores(const fs::path& dir) {
+    fs::remove_all(dir);
+    const long khz[8] = {2016000, 2016000, 2016000, 2803200, 2803200, 2803200, 2803200, 3360000};
+    for (int i = 0; i < 8; ++i) {
+        const fs::path f = dir / ("cpu" + std::to_string(i)) / "cpufreq";
+        fs::create_directories(f);
+        std::ofstream(f / "cpuinfo_max_freq") << khz[i] << "\n";
+    }
+    fs::create_directories(dir / "cpufreq");  // sysfs has other entries too
+    const std::vector<int> fast = pk::fast_cores(dir.string());
+    CHECK((fast == std::vector<int>{7, 3, 4, 5, 6}));  // fastest first, little cores left out
+    fs::remove_all(dir / "cpu4" / "cpufreq");          // an offline core
+    CHECK((pk::fast_cores(dir.string()) == std::vector<int>{7, 3, 5, 6}));
+    for (int i = 0; i < 8; ++i)
+        if (fs::exists(dir / ("cpu" + std::to_string(i)) / "cpufreq"))
+            std::ofstream(dir / ("cpu" + std::to_string(i)) / "cpufreq" / "cpuinfo_max_freq") << 3000000 << "\n";
+    CHECK(pk::fast_cores(dir.string()).empty());  // all alike: nothing to choose
+    CHECK(pk::fast_cores((dir / "missing").string()).empty());
+    { pk::CoreAffinity none({}); CHECK(!none.active()); }
+    fs::remove_all(dir);
+}
+
 int main() {
     test_text();
+    test_cpu_cores(fs::temp_directory_path() / "pk_cpu_cores_test");
     test_srt();
     test_fileio(fs::temp_directory_path() / "pk_common_tests");
     test_catalog();

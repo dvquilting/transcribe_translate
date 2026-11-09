@@ -66,11 +66,13 @@ private:
     void parseLine(const QString& line);
     void appendLog(const QString& text);
     void setEngine(const QString& backend, const QString& detail);
+    void setDraftNote(const QString& note);  // the faster mode's state, after the engine
     void updateTiming();
     void resetTiming();
     QString plannedOutput() const;
     bool confirmOverwrite(QString& out);
     void reloadPartial();
+    bool finishPdf();  // the translated PDF, from the engine's output (false: failed, see the status)
 
     // widgets
     QComboBox* modelCombo_ = nullptr;
@@ -91,6 +93,7 @@ private:
     QComboBox* deviceCombo_ = nullptr;
     QSpinBox* threadsSpin_ = nullptr;
     QCheckBox* contextCheck_ = nullptr;
+    QComboBox* draftCombo_ = nullptr;  // the faster mode: --draft auto|<helper>|off (faster_mode.h)
     QLineEdit* modelFileEdit_ = nullptr;
     QLineEdit* modelsDirEdit_ = nullptr;
     QPushButton* cancelBtn_ = nullptr;
@@ -114,12 +117,23 @@ private:
     QString textOutput_;   // output file of a text-box run
     QString written_;      // file the last run wrote
     QString runInput_;     // the input file of the current/last run (History)
+    // PDFs: a PDF is translated as Markdown (pdf_files.h), and a .pdf output is
+    // made here from the engine's output when it is done.
+    enum class PdfFrom { None, Pdf, Markdown, Text };
+    PdfFrom pdfFrom_ = PdfFrom::None;  // what the engine's output is, when a PDF is to be made
+    QString pdfOutput_;                // the PDF to write
+    QString pdfEngineOutput_;          // the engine's output (in tempDir_)
+    QString pdfTitle_;
     QString lastError_;
+    QString engineHtml_;  // the Compute line without the faster mode's note
+    QString draftNote_;   // the faster mode's note for this run
     bool downloading_ = false;
     QElapsedTimer clock_;           // whole run
     qint64 translateStartMs_ = -1;  // clock_ time when translation began (after loading)
     double translateSeconds_ = -1;  // final, from tt_engine translate
     int words_ = -1;                // source words
     int piecesDone_ = 0, piecesTotal_ = 0;
+    double fraction_ = -1;          // share translated ("progress: translating"), -1 = none yet
+    void showTranslating();         // the status line while translating
     bool finished_ = false;
 };

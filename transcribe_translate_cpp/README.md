@@ -7,8 +7,8 @@ and `speech_translate_cpp` do, in one window with four tabs:
 | Tab | What it does |
 |---|---|
 | **Transcribe** | audio/video → .txt, .srt, Word, PDF; optional AI post-processing (smart paragraphs, corrected copy, summary). **Translate...** hands the transcript to the Translate tab. |
-| **Translate** | typed text, or .txt / .md / .srt / .docx files, keeping the layout |
-| **Speech translation** | audio/video → translated subtitles (original, bilingual, text), several speakers, and an optional dub in the speaker's (cloned) voice |
+| **Translate** | typed text, or .txt / .md / .srt / .docx / .pdf files, keeping the layout (a PDF is rebuilt as headings and paragraphs; .txt and .md can also be saved as PDF) |
+| **Speech translation** | audio/video → translated subtitles (original, bilingual, text, PDF), several speakers, and an optional dub in the speaker's (cloned) voice |
 | **History** | every job with the files it saved: open the file or its folder, or use the same input again (kept in `history.json` in the program's data folder) |
 
 **Help** (F1), **Model files** and **Quit** sit next to the tabs and serve all
@@ -46,10 +46,24 @@ on Linux its static libraries' symbols stay local (`--exclude-libs,ALL`,
 its own symbol table anyway. `build_all.sh` checks that the library exports
 no `ggml_`/`llama_` symbols. The library is loaded only by `tt_engine translate`.
 
+PDFs never reach the engine. The window writes them with Qt's `QPdfWriter`
+(system fonts embedded, every script shaped). It reads them with PDFium
+(`pdfium.dll` / `libpdfium.so` from [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),
+downloaded by `build_all` into `third_party/pdfium` and copied next to the
+window; loaded at run time, so the window starts without it). The text of each
+page is rebuilt into headings (by font size), paragraphs (by spacing, indents
+and short last lines; hyphenation undone), page breaks and page size; page
+numbers and running headers are dropped. That becomes a Markdown file
+(`# heading`, one paragraph per line, `<!-- page -->`), which the engine
+translates like any Markdown, and the result is laid out as a new PDF. A
+scanned PDF has no text layer and is refused (no OCR). `TT_PDF_DEBUG=1` prints
+the lines as read.
+
 ```
 src/gui/        the window: mainwindow (tabs, Help, Model files, Quit),
                 transcribe_page, translate_page, speech_page, history_page,
-                jobgate (one job at a time, the engine's path)
+                jobgate (one job at a time, the engine's path), pdf_files (PDFs
+                are written with Qt and read with PDFium here, not in the engine)
 src/engine/     tt_engine: main.cpp (the commands) + the speech/dub engine
 src/translate/  the translation library (its own CMakeLists.txt)
 src/common/     plain C++ shared by all parts (subtitles, files, Word writer,
@@ -109,15 +123,54 @@ transcribe_translate --speech talk.mp4      # the window, on a tab, with a file
 `tt_engine COMMAND --help` lists each command's options (they are those of
 `transcribe_multi` and `translate_text`).
 
+### Faster TranslateGemma 12B and 27B (speculative decoding)
+
+`tt_engine translate ... --draft auto` (the window's default, **Faster mode**
+under Advanced on the Translate and Speech translation tabs) lets a small helper
+model guess a few tokens ahead: `--draft translategemma-4b` (TranslateGemma 4B
+Q4_K_M, 2.5 GB, the best guesser), `--draft gemma-3-1b` (Gemma 3 1B instruct
+Q8_0, 1.1 GB: guesses less well, but fits beside TranslateGemma 12B on a 16 GB
+card) or `auto` (the 4B if it fits beside the model by a rough estimate -
+model + helper + 3 GB - else the 1B). The model list also has
+`translategemma-12b-q4`, TranslateGemma 12B as a 7.3 GB file, which leaves room
+for the 4B helper on 16 GB; the large model checks all of them in one step and keeps only the
+tokens it would have chosen itself, so the translation is the same, only
+sooner. How far it drafts is chosen step by step from measured costs (the time
+of a step of the model for each number of drafted tokens - a step without a
+draft is measured first - of a token of the draft model, and how often the
+guesses are right) to write the most tokens per second; where no draft pays off it
+writes without one, trying a short draft now and then. The model's choices are
+read as the largest logit (no sampler pass over the 262K vocabulary) and the
+draft stops at a token it is unsure of (logit margin under 1). (The one exception: the model's numbers for one token checked alone and
+for several checked at once can differ in the last decimal place, which can
+change a word where two were exactly as likely.) It is used only on a graphics
+card, and only if both models fit on it whole: a layer of the large model
+pushed onto the processor slows every step, and the processor works through a
+draft's tokens one by one, so a split model loses more than drafting saves
+(measured with 27B on 16 GB). 12B with the 4B draft needs a little more than
+16 GB (a 16 GB card is usually just too small), 27B about 24 GB. Otherwise the log says why it was skipped, and if loading the draft model
+fails after all (graphics memory), the translation goes on at the usual speed.
+The helper is downloaded to the models folder on first use (for the 4B, an
+existing Q8_0 download is used when it fits). The log ends with how many of
+the drafted tokens were accepted and the speed-up (the writing time against an
+estimate for one token per step); the window shows that next to Compute.
+`--draft PATH` uses another draft model with the same vocabulary, `--draft-max N`
+caps how far it drafts ahead (default 7: with the token being checked, 8 per
+step, the largest batch llama.cpp's CUDA backend handles with its
+matrix-vector kernels).
+
 ## Tests
 
 `ctest --test-dir build-gui` (run by both build scripts):
 
 - `common`, `engine_helpers`, `translate_formats`, `translate_partial_exit_contract`,
   `subtitles`, `child_process`, `model_files` - the three programs' unit tests
+- `pdf` - writing PDFs, reading them back with PDFium (headings, paragraphs,
+  page breaks, page size, no page numbers), the Markdown in between, a scanned PDF
 - `gui` - the window with a stand-in engine (`tests/fake_engine.cpp`): a
-  transcription handed on to Translate, a file translation, a speech
-  translation, one job at a time, the History and the settings
+  transcription handed on to Translate, a file translation, a PDF translated
+  into a PDF, a speech translation (with its PDF), one job at a time, the
+  History and the settings
 
 For development, `-DTT_BUILD_ENGINE_DYNAMIC=ON` also builds a `bin/dynamic/tt_engine`
 that loads CrispASR (`libcrispasr.so` / `crispasr.dll`) at run time.
