@@ -98,7 +98,7 @@ Git and Qt 6 (MinGW kit) - the same as the three separate programs.
 ```bat
 build_all.bat          :: everything -> dist\   (the first build takes long: CUDA kernels)
 build_all.bat gui      :: only the window and the tests (the engine is kept)
-make_installer.bat     :: -> installer\output\TranscribeTranslate-1.0.0-setup.exe
+make_installer.bat     :: -> installer\output\TranscribeTranslate-1.1.0-setup.exe
 clean.bat [all]
 ```
 
