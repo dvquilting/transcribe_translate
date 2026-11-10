@@ -79,6 +79,7 @@ MainWindow::MainWindow(const QString& historyFile, QWidget* parent)
     freeGpuBtn_ = new QPushButton(tr("Free GPU memory"));
     connect(freeGpuBtn_, &QPushButton::clicked, this, [] { tt::TranslateEngine::instance().release(); });
     connect(&tt::TranslateEngine::instance(), &tt::TranslateEngine::loadedChanged, this, &MainWindow::updateFreeGpu);
+    connect(&tt::TranslateEngine::instance(), &tt::TranslateEngine::preloadingChanged, this, &MainWindow::updateFreeGpu);
     auto* quit = new QPushButton(tr("Quit"));
     quit->setShortcut(QKeySequence::Quit);  // Ctrl+Q
     quit->setToolTip(tr("Close the program (asks first if a job is running)"));
@@ -155,7 +156,9 @@ QString MainWindow::helpHtml() {
         "<p>One job runs at a time, so each model has the graphics card to itself; the other tabs can be set up "
         "meanwhile. Dropping a file onto a tab chooses it as that tab's input.</p>"
         "<p>The Translate tab keeps its model loaded on the graphics card after a translation, so the next one "
-        "starts at once instead of loading the model again. <b>Free GPU memory</b> unloads it, for a game or "
+        "starts at once instead of loading the model again. It also loads the chosen model in the background when "
+        "the tab opens or the model changes (if it is downloaded; <i>Load the model when this tab opens</i> under "
+        "Advanced turns that off), so even the first translation starts at once. <b>Free GPU memory</b> unloads it, for a game or "
         "another program that needs the graphics card; it is also unloaded when another tab starts a job, before "
         "<b>Model files</b> opens, and when the program closes.</p><hr>");
     h += TranscribePage::helpHtml() + QStringLiteral("<hr>");
@@ -166,9 +169,13 @@ QString MainWindow::helpHtml() {
 
 void MainWindow::updateFreeGpu() {
     const QString model = tt::TranslateEngine::instance().loadedModel();
-    freeGpuBtn_->setEnabled(!model.isEmpty() && !tt::JobGate::instance().busy());
+    const bool loading = tt::TranslateEngine::instance().isPreloading();
+    freeGpuBtn_->setEnabled((!model.isEmpty() || loading) && !tt::JobGate::instance().busy());
     freeGpuBtn_->setToolTip(
-        model.isEmpty()
+        loading  // (also when another model is still loaded: it is being replaced)
+            ? tr("Translate is loading its model in the background, for the next translation. This stops that "
+                 "and frees the graphics card's memory.")
+        : model.isEmpty()
             ? tr("Frees the graphics card's memory when Translate keeps a model loaded for the next translation "
                  "(nothing is loaded now)")
             : tr("%1 stays loaded on the graphics card after a translation, so the next one starts at once. "

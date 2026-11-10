@@ -40,6 +40,11 @@ public:
     // (finished or failedToStart) exactly once and then deletes itself.
     EngineJob* start(const QStringList& args);
     bool isActive() const { return job_ != nullptr; }
+    // Load the model for jobs with these ARGS ahead of time, in the background
+    // (nothing is translated, nothing downloaded). Ignored while a job or a
+    // preload runs. A job started meanwhile waits for it in the engine.
+    void preload(const QStringList& args);
+    bool isPreloading() const { return preloading_; }
     // Stop the running job (finished(..., true) follows). False if none.
     bool cancel();
     // Free the graphics memory: end the engine and its model. Not while a job runs.
@@ -50,8 +55,13 @@ public:
     // The model kept loaded ("" = none), e.g. "TranslateGemma 12B".
     QString loadedModel() const { return loaded_; }
 
+    // How a preload ended.
+    enum class PreloadEnd { Loaded, Skipped, Stopped };  // Skipped: not downloaded yet; Stopped: ended
+
 signals:
     void loadedChanged(const QString& model);
+    void preloadingChanged(bool preloading);
+    void preloadEnded(tt::TranslateEngine::PreloadEnd how);
 
 private:
     TranslateEngine();
@@ -64,6 +74,9 @@ private:
 
     pk::ChildProcess process_;
     QPointer<EngineJob> job_;
+    bool preloading_ = false;  // the engine's current (first) command is a preload
+    bool preloadSkipped_ = false;  // ... and it said it skipped (tt-preload-skipped)
+    void setPreloading(bool on, PreloadEnd how = PreloadEnd::Stopped);
     bool cancelRequested_ = false;
     QTimer killTimer_;  // a cancelled job that doesn't stop in time
     QString loaded_;

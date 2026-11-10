@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
     QStandardPaths::setTestModeEnabled(true);
     QApplication app(argc, argv);
     const bool pdfium = tt::pdfiumProblem().isEmpty();  // reading PDFs (TT_PDFIUM)
-    const int jobs = pdfium ? 7 : 6;                     // in the History at the end
+    const int jobs = pdfium ? 9 : 8;                     // in the History at the end
     QApplication::setOrganizationName(QStringLiteral("DavidV"));
     QApplication::setApplicationName(QStringLiteral("TranscribeTranslateTest"));
     QApplication::setApplicationDisplayName(QStringLiteral("Transcribe & Translate"));
@@ -289,6 +289,63 @@ int main(int argc, char** argv) {
             if (freeGpu) freeGpu->click();
             CHECK(tt::TranslateEngine::instance().loadedModel().isEmpty());
             CHECK(freeGpu && !freeGpu->isEnabled());
+
+            // Back on the tab: the model is loaded ahead, in the background, without a job.
+            const int preloads = (int)fakeRuns(log + QStringLiteral(".preload")).size();
+            const int jobsBefore = (int)fakeRuns(log).size();
+            tabs->setCurrentIndex(3);
+            QApplication::processEvents();
+            tabs->setCurrentIndex(1);
+            CHECK(waitFor([&] { return !tt::TranslateEngine::instance().loadedModel().isEmpty(); }, 8000));
+            CHECK((int)fakeRuns(log + QStringLiteral(".preload")).size() == preloads + 1);
+            CHECK((int)fakeRuns(log).size() == jobsBefore);  // no translation
+            CHECK(!lp->isRunning() && !tt::JobGate::instance().busy());
+            CHECK(freeGpu && freeGpu->isEnabled());
+            // The next translation uses it (the same engine: no second one started).
+            const int servers = (int)fakeRuns(log + QStringLiteral(".serve")).size();
+            lp->openFile(txt);
+            if (outEdit) outEdit->setText(work.filePath(QStringLiteral("again2.de.txt")));
+            click(lp, QStringLiteral("Translate file"));
+            CHECK(waitFor([&] { return !lp->isRunning(); }));
+            CHECK(readText(work.filePath(QStringLiteral("again2.de.txt"))).startsWith(QStringLiteral("[de] Good morning")));
+            CHECK((int)fakeRuns(log + QStringLiteral(".serve")).size() == servers);
+
+            // A slow load: a setting changed while it loads is loaded next ...
+            auto& engine = tt::TranslateEngine::instance();
+            QComboBox* device = nullptr;
+            for (QComboBox* c : lp->findChildren<QComboBox*>())
+                if (c->findText(QStringLiteral("vulkan")) >= 0) device = c;
+            CHECK(device);
+            qputenv("TT_FAKE_PRELOAD_MS", "1000");
+            if (freeGpu) freeGpu->click();
+            const int p0 = (int)fakeRuns(log + QStringLiteral(".preload")).size();
+            tabs->setCurrentIndex(3);
+            QApplication::processEvents();
+            tabs->setCurrentIndex(1);
+            CHECK(waitFor([&] { return engine.isPreloading(); }, 5000));
+            if (freeGpu) CHECK(freeGpu->toolTip().contains(QStringLiteral("loading its model in the background")));
+            if (device) device->setCurrentText(QStringLiteral("cpu"));
+            CHECK(waitFor([&] { return (int)fakeRuns(log + QStringLiteral(".preload")).size() == p0 + 2 &&
+                                       !engine.isPreloading(); }, 10000));
+            CHECK(fakeRuns(log + QStringLiteral(".preload")).last().contains(QStringLiteral("--device\tcpu")));
+            // ... and a translation started during a load waits for it, and says so.
+            if (freeGpu) freeGpu->click();
+            tabs->setCurrentIndex(3);
+            QApplication::processEvents();
+            tabs->setCurrentIndex(1);
+            CHECK(waitFor([&] { return engine.isPreloading(); }, 5000));
+            lp->openFile(txt);
+            if (outEdit) outEdit->setText(work.filePath(QStringLiteral("again3.de.txt")));
+            click(lp, QStringLiteral("Translate file"));
+            bool waitShown = false;
+            for (QLabel* l : lp->findChildren<QLabel*>())
+                waitShown = waitShown || l->text().startsWith(QStringLiteral("Waiting for the model to finish loading"));
+            CHECK(waitShown);
+            CHECK(waitFor([&] { return !lp->isRunning(); }, 10000));
+            CHECK(readText(work.filePath(QStringLiteral("again3.de.txt"))).startsWith(QStringLiteral("[de] Good morning")));
+            qunsetenv("TT_FAKE_PRELOAD_MS");
+            if (device) device->setCurrentText(QStringLiteral("auto"));
+            CHECK(waitFor([&] { return !engine.isPreloading(); }, 10000));
         }
 
         // Pictures of the tabs, for a look at the layout: TT_SCREENSHOTS=<folder>.

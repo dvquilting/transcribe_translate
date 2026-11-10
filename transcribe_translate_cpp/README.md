@@ -52,7 +52,13 @@ loaded, so a second translation starts without loading 10 GB again. Jobs go in
 on stdin (`job<TAB>args`, `cancel`, `unload`, `quit`); each ends with a
 `tt-job-done <code>` line, and `tt-model <name>` says what stays loaded. Another
 tab's job, **Free GPU memory**, **Model files** and closing the window end the
-engine. A cancelled job stops at once; if it doesn't within 4 s (a download,
+engine. The tab also loads the model ahead (a `job` line ending in `--preload`:
+the engine loads the model and its draft model for such jobs and translates
+nothing) a moment after it is shown or its model, faster mode or device
+changes, unless a job runs or the model would have to be downloaded first; a
+job started meanwhile waits for the load in the engine. A model kept loaded
+keeps its draft model for the next job asking the same: choosing again would
+measure the graphics memory that model now takes. A cancelled job stops at once; if it doesn't within 4 s (a download,
 loading), the engine is ended.
 
 PDFs never reach the engine. The window writes them with Qt's `QPdfWriter`

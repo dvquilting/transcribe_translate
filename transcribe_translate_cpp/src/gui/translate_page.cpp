@@ -228,6 +228,7 @@ void TranslatePage::buildUi() {
     root->addWidget(top);
 
     connect(modelCombo_, &QComboBox::currentIndexChanged, this, &TranslatePage::updateModelInfo);
+    connect(modelCombo_, &QComboBox::currentIndexChanged, this, &TranslatePage::schedulePreload);
     connect(fromCombo_, &QComboBox::currentIndexChanged, this, &TranslatePage::updateModelInfo);
     connect(toCombo_, &QComboBox::currentIndexChanged, this, &TranslatePage::updateModelInfo);
     connect(swap, &QPushButton::clicked, this, &TranslatePage::swapLanguages);
@@ -333,6 +334,30 @@ void TranslatePage::buildUi() {
     af->addRow(QString(), contextCheck_);
     draftCombo_ = tt::makeFasterModeCombo();
     af->addRow(tr("Faster mode:"), draftCombo_);
+    preloadCheck_ = new QCheckBox(tr("Load the model when this tab opens, so a translation starts at once"));
+    preloadCheck_->setChecked(true);
+    preloadCheck_->setToolTip(tr("Loads the chosen model (and the faster mode's helper) onto the graphics card in "
+                                 "the background while you choose a file or type. Nothing is downloaded: a model "
+                                 "that isn't downloaded yet is loaded when you translate. Free GPU memory "
+                                 "unloads it."));
+    af->addRow(QString(), preloadCheck_);
+    preloadTimer_ = new QTimer(this);
+    preloadTimer_->setSingleShot(true);
+    preloadTimer_->setInterval(1200);  // after the window has settled, and not on every click through a list
+    connect(preloadTimer_, &QTimer::timeout, this, &TranslatePage::preloadNow);
+    connect(draftCombo_, &QComboBox::currentIndexChanged, this, &TranslatePage::schedulePreload);
+    connect(deviceCombo_, &QComboBox::currentIndexChanged, this, &TranslatePage::schedulePreload);
+    connect(preloadCheck_, &QCheckBox::toggled, this, &TranslatePage::schedulePreload);
+    tt::TranslateEngine& engine = tt::TranslateEngine::instance();
+    connect(&engine, &tt::TranslateEngine::preloadingChanged, this, &TranslatePage::showModelState);
+    connect(&engine, &tt::TranslateEngine::loadedChanged, this, &TranslatePage::showModelState);
+    connect(&engine, &tt::TranslateEngine::preloadEnded, this, [this](tt::TranslateEngine::PreloadEnd how) {
+        lastPreloadSkipped_ = how == tt::TranslateEngine::PreloadEnd::Skipped;
+        // A setting changed while it loaded (that preload was refused then): load
+        // for the new one. (Nothing happens if nothing changed.) Not after a stop
+        // (Free GPU memory, another tab's job).
+        if (how == tt::TranslateEngine::PreloadEnd::Loaded) schedulePreload();
+    });
     modelFileEdit_ = new QLineEdit;
     modelFileEdit_->setPlaceholderText(tr("(download the selected model)"));
     auto* bm = new QPushButton(tr("Browse..."));
@@ -691,6 +716,7 @@ bool TranslatePage::startProcess(const QStringList& args, Mode mode) {
     appendLog(QStringLiteral("> tt_engine translate ") + shown.join(QLatin1Char(' ')) + QLatin1Char('\n'));
 
     setRunning(true);
+    modelStateShown_ = false;
     statusLabel_->setText(tr("Starting..."));
     clock_.start();
     tick_->start();
@@ -706,6 +732,12 @@ bool TranslatePage::startProcess(const QStringList& args, Mode mode) {
     connect(job_, &tt::EngineJob::lineReceived, this, &TranslatePage::parseLine);
     connect(job_, &tt::EngineJob::finished, this, &TranslatePage::processFinished);
     connect(job_, &tt::EngineJob::failedToStart, this, &TranslatePage::processFailedToStart);
+    if (tt::TranslateEngine::instance().isPreloading()) {
+        // The engine is still loading ahead: this job begins when that is done.
+        const QString wait = tr("Waiting for the model to finish loading (it was loading in the background)...");
+        statusLabel_->setText(wait);
+        appendLog(wait + QLatin1Char('\n'));
+    }
     return true;
 }
 
@@ -970,6 +1002,49 @@ void TranslatePage::dropEvent(QDropEvent* e) {
         }
 }
 
+// ------------------------------------------------------------------ loading ahead
+void TranslatePage::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    schedulePreload();
+}
+
+void TranslatePage::schedulePreload() {
+    if (preloadTimer_ && preloadCheck_ && preloadCheck_->isChecked()) preloadTimer_->start();
+}
+
+// Load the model the next translation will use, unless it is loaded already,
+// a job runs (here or on another tab), or the tab isn't showing.
+void TranslatePage::preloadNow() {
+    tt::TranslateEngine& engine = tt::TranslateEngine::instance();
+    if (!preloadCheck_->isChecked() || !isVisible() || job_ || tt::JobGate::instance().busy() || engine.isPreloading())
+        return;
+    // Like a translation of the text box (the languages don't change what is loaded).
+    const QStringList args = QStringList{QStringLiteral("--text"), QStringLiteral("preload")} + commonArguments();
+    // Already loaded for these, or skipped for them (not downloaded: tried again
+    // when a setting changes, not on every visit to the tab).
+    if (args == lastPreload_ && (!engine.loadedModel().isEmpty() || lastPreloadSkipped_)) return;
+    lastPreload_ = args;
+    lastPreloadSkipped_ = false;
+    engine.preload(args);
+}
+
+// The status line while nothing runs: the model being loaded, or ready.
+void TranslatePage::showModelState() {
+    if (job_) return;
+    tt::TranslateEngine& engine = tt::TranslateEngine::instance();
+    const tl::ModelInfo* m = tl::find_model(modelCombo_->currentData().toString().toStdString());
+    const QString name = m ? q(m->display) : QString();
+    if (engine.isPreloading()) {
+        statusLabel_->setText(tr("Loading %1 in the background, for the next translation...").arg(name));
+        modelStateShown_ = true;
+    } else if (!engine.loadedModel().isEmpty() && modelStateShown_) {
+        statusLabel_->setText(tr("%1 is loaded: a translation starts at once.").arg(engine.loadedModel()));
+    } else if (modelStateShown_) {  // unloaded, or not loaded ahead (not downloaded yet)
+        statusLabel_->clear();
+        modelStateShown_ = false;
+    }
+}
+
 void TranslatePage::loadSettings() {
     auto& s = settings_;
     selectData(modelCombo_, s.value(QStringLiteral("model"), QStringLiteral("translategemma-12b")));
@@ -978,6 +1053,7 @@ void TranslatePage::loadSettings() {
     deviceCombo_->setCurrentText(s.value(QStringLiteral("device"), QStringLiteral("auto")).toString());
     threadsSpin_->setValue(s.value(QStringLiteral("threads"), 0).toInt());
     contextCheck_->setChecked(s.value(QStringLiteral("context"), true).toBool());
+    preloadCheck_->setChecked(s.value(QStringLiteral("preload"), true).toBool());
     tt::selectFasterMode(draftCombo_, tt::loadFasterMode(s));
     modelsDirEdit_->setText(s.value(QStringLiteral("modelsDir")).toString());
     const QString last = s.value(QStringLiteral("lastEngine")).toString();
@@ -996,6 +1072,7 @@ void TranslatePage::saveSettings() {
     s.setValue(QStringLiteral("device"), deviceCombo_->currentText());
     s.setValue(QStringLiteral("threads"), threadsSpin_->value());
     s.setValue(QStringLiteral("context"), contextCheck_->isChecked());
+    s.setValue(QStringLiteral("preload"), preloadCheck_->isChecked());
     s.setValue(QStringLiteral("draftModel"), draftCombo_->currentData());
     s.setValue(QStringLiteral("modelsDir"), modelsDirEdit_->text());
 }

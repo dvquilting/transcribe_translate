@@ -42,6 +42,7 @@ signals:
 protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void showEvent(QShowEvent* event) override;  // the tab is shown: load the model ahead
 
 private slots:
     void translateText();
@@ -109,6 +110,14 @@ private:
     QLineEdit* totalEdit_ = nullptr;
     QPlainTextEdit* logView_ = nullptr;
     QTimer* tick_ = nullptr;
+    QCheckBox* preloadCheck_ = nullptr;  // load the model when the tab opens
+    QTimer* preloadTimer_ = nullptr;     // a moment after the tab or a setting changed
+    QStringList lastPreload_;            // the arguments last preloaded for
+    bool lastPreloadSkipped_ = false;    // ... and it was skipped (not downloaded): not again for them
+    void schedulePreload();
+    void preloadNow();
+    void showModelState();
+    bool modelStateShown_ = false;       // the status line shows the loaded model (not a job's end)
 
     // state
     QSettings settings_;

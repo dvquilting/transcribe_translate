@@ -10,6 +10,8 @@
 // uses it for the Translate tab): it reads commands from stdin, one per line -
 //   job<TAB>ARG<TAB>ARG...   a translation, with the arguments of one run
 //                            (escaped: \\ \t \n \r)
+//   job<TAB>...<TAB>--preload  load the model for such jobs, translate nothing
+//                            (skipped if a model would have to be downloaded)
 //   cancel                   stop the running job
 //   unload                   free the model (and the graphics memory)
 //   quit                     (or end of input) exit
@@ -78,6 +80,7 @@ struct Args {
     std::string draft = "off";   // off | auto | PATH: draft model for speculative decoding
     int draft_max = 7;
     bool verbose = false;
+    bool preload = false;        // --serve: only load the model (and helper) for later jobs
 };
 
 // --serve: a job ends by throwing this instead of exiting the process.
@@ -93,6 +96,10 @@ struct LoadedModel {
     std::string display;
     std::unique_ptr<Llm> llm;
     std::string note;
+    // The draft model chosen for it: the next job asking the same keeps it (the
+    // graphics memory it measures to choose one is now taken by this model).
+    std::string draft_for;  // model file, --draft, device, models folder
+    std::string draft_path;
 } g_loaded;
 
 void say(const std::string& s);
@@ -210,6 +217,7 @@ Args parse_args(const std::vector<std::string>& av) {
         else if (o == "--draft") a.draft = need(i);
         else if (o == "--draft-max") a.draft_max = std::atoi(need(i).c_str());
         else if (o == "--verbose") a.verbose = true;
+        else if (o == "--preload") a.preload = true;
         else if (!o.empty() && o[0] == '-' && o.size() > 1) die("unknown option " + o + " (see --help)", 2);
         else if (a.input.empty()) a.input = o;
         else die("unexpected argument " + o, 2);
@@ -288,7 +296,10 @@ std::string ensure_model(const ModelInfo& m, const Args& a) {
 //   PATH                a .gguf with the model's vocabulary
 // Downloaded on first use. Only for TranslateGemma 12B/27B, on a graphics card
 // with room for both (roughly here; Llm checks exactly).
-std::string ensure_draft(const ModelInfo& m, const std::string& model_path, const Args& a) {
+// `needs_download`: if given, a helper that isn't downloaded yet is not
+// downloaded; the flag is set instead.
+std::string ensure_draft(const ModelInfo& m, const std::string& model_path, const Args& a,
+                         bool* needs_download = nullptr) {
     const std::string d = lower(a.draft);
     if (d == "off" || d == "none" || d.empty()) return "";
     if (d != "auto" && !find_draft_model(d)) {
@@ -296,6 +307,23 @@ std::string ensure_draft(const ModelInfo& m, const std::string& model_path, cons
         return a.draft;
     }
     if (m.family != Family::TranslateGemma || m.key == "translategemma-4b") return "";
+    if (needs_download) {
+        // Loading ahead (--preload): with no helper downloaded the job will download
+        // one, so there is nothing to load yet - and no reason to start the graphics
+        // driver to measure its memory (it would keep some for itself while idle).
+        bool any = false;
+        for (const std::string& key : d == "auto" ? std::vector<std::string>{"translategemma-4b", "gemma-3-1b"}
+                                                  : std::vector<std::string>{d}) {
+            any = any || fs::exists(models_dir(a) / find_draft_model(key)->file);
+            if (key == "translategemma-4b")
+                if (const ModelInfo* q8 = find_model("translategemma-4b"))
+                    any = any || fs::exists(models_dir(a) / q8->file);
+        }
+        if (!any) {
+            *needs_download = true;
+            return "";
+        }
+    }
     const uint64_t have = gpu_free_memory(a.device);
     if (have == 0) {
         say("Note: no draft model - it only speeds up translation on a graphics card");
@@ -342,6 +370,10 @@ std::string ensure_draft(const ModelInfo& m, const std::string& model_path, cons
             say("Note: faster mode with " + c.info->display + ": " + choices[0].info->display +
                 " doesn't fit beside " + m.display + " on the graphics card");
         if (!c.path.empty()) return c.path;
+        if (needs_download) {
+            *needs_download = true;
+            return "";
+        }
         return download_model(*c.info, a, c.info->display + ", the draft model that speeds up " + m.display);
     }
     char buf[240];
@@ -454,8 +486,31 @@ int translate_main(const std::vector<std::string>& av) {
 
         // ---- load the model -----------------------------------------------------
         const auto t0 = std::chrono::steady_clock::now();
+        if (args.preload) {
+            // Loading ahead of a job: never a download the user didn't start.
+            const bool have = args.model_file.empty() ? fs::exists(models_dir(args) / model.file)
+                                                      : fs::exists(path_from_utf8(args.model_file));
+            if (!have) {
+                say("tt-preload-skipped (the model isn't downloaded yet)");
+                return 0;
+            }
+        }
         const std::string model_path = ensure_model(model, args);
-        const std::string draft_path = ensure_draft(model, model_path, args);
+        // A model kept loaded keeps its draft model: choosing again would measure the
+        // graphics memory that model now takes, and come to another choice.
+        const std::string draft_for = model_path + '\n' + lower(args.draft) + '\n' + lower(args.device) + '\n' +
+                                      path_to_utf8(models_dir(args));
+        std::string draft_path;
+        if (g_serving && g_loaded.llm && g_loaded.draft_for == draft_for) {
+            draft_path = g_loaded.draft_path;
+        } else {
+            bool needs_download = false;
+            draft_path = ensure_draft(model, model_path, args, args.preload ? &needs_download : nullptr);
+            if (needs_download) {
+                say("tt-preload-skipped (the helper model isn't downloaded yet)");
+                return 0;
+            }
+        }
         EngineOptions eo;
         eo.draft_model_path = draft_path;
         eo.draft_max = args.draft_max;
@@ -485,6 +540,8 @@ int translate_main(const std::vector<std::string>& av) {
                 g_loaded.key = key;
                 g_loaded.display = model.display;
                 g_loaded.note = note;
+                g_loaded.draft_for = draft_for;
+                g_loaded.draft_path = draft_path;
                 g_loaded.llm = std::move(own);
                 say("tt-model " + model.display);
             }
@@ -500,6 +557,10 @@ int translate_main(const std::vector<std::string>& av) {
                 " (speculative decoding: the same translation, sooner)");
         else if (!draft_path.empty())
             say("Note: draft model " + llm.draft_info());
+        if (args.preload) {
+            say("tt-preloaded " + model.display);
+            return 0;
+        }
 
         TranslateOptions to;
         to.source = args.source;

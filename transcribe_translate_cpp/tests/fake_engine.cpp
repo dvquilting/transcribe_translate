@@ -69,6 +69,20 @@ int serve() {
             } else cur += line[i];
         }
         args.push_back(cur);
+        if (std::find(args.begin(), args.end(), "--preload") != args.end()) {  // load only (not in the job log)
+            if (const char* log = std::getenv("TT_FAKE_LOG")) {
+                std::ofstream f(std::string(log) + ".preload", std::ios::app);
+                for (size_t i = 0; i < args.size(); ++i) f << (i ? "\t" : "") << args[i];
+                f << "\n";
+            }
+            if (!loaded) say("tt-model Fake model");
+            loaded = true;
+            if (const char* ms = std::getenv("TT_FAKE_PRELOAD_MS"))  // a slow load
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(ms)));
+            say("tt-preloaded Fake model");
+            say("tt-job-done 0");
+            continue;
+        }
         if (!loaded) say("tt-model Fake model");
         else say("Loading Fake model ... (kept loaded from the last translation)");
         loaded = true;

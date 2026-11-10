@@ -55,6 +55,27 @@ EngineJob* TranslateEngine::start(const QStringList& args) {
     return job_;
 }
 
+void TranslateEngine::preload(const QStringList& args) {
+    if (job_ || preloading_) return;
+    if (!process_.isRunning() &&
+        (process_.isActive() ||  // (the last engine is still being ended)
+         !process_.start(enginePath(), {QStringLiteral("translate"), QStringLiteral("--serve")})))
+        return;
+    QStringList escaped;
+    for (const QString& a : args) escaped << escapeEngineArg(a);
+    escaped << QStringLiteral("--preload");
+    preloadSkipped_ = false;
+    setPreloading(true);
+    send((QStringLiteral("job\t") + escaped.join(QLatin1Char('\t'))).toUtf8());
+}
+
+void TranslateEngine::setPreloading(bool on, PreloadEnd how) {
+    if (on == preloading_) return;
+    preloading_ = on;
+    emit preloadingChanged(on);
+    if (!on) emit preloadEnded(how);
+}
+
 void TranslateEngine::send(const QByteArray& line) {
     if (QProcess* p = process_.process()) p->write(line + '\n');
 }
@@ -62,6 +83,10 @@ void TranslateEngine::send(const QByteArray& line) {
 bool TranslateEngine::cancel() {
     if (!job_) return false;
     cancelRequested_ = true;
+    if (preloading_) {  // the job hasn't begun: the engine is still loading for the preload
+        process_.cancel();
+        return true;
+    }
     send("cancel");
     killTimer_.start();
     return true;
@@ -70,6 +95,7 @@ bool TranslateEngine::cancel() {
 void TranslateEngine::release() {
     if (job_ || !process_.isActive()) return;
     process_.stop();  // no signals: the model is gone with the process
+    setPreloading(false);
     setLoaded(QString());
 }
 
@@ -82,11 +108,18 @@ void TranslateEngine::shutdown() {
     }
     process_.stop();
     loaded_.clear();
+    preloading_ = false;
 }
 
 void TranslateEngine::onLine(const QString& line) {
     if (line.startsWith(QLatin1String("tt-model "))) {
         setLoaded(line.mid(9).trimmed());
+        return;
+    }
+    if (preloading_) {  // the preload's own lines (it comes before any job): not a job's
+        if (line.startsWith(QLatin1String("tt-preload-skipped"))) preloadSkipped_ = true;
+        if (line.startsWith(QLatin1String("tt-job-done ")))
+            setPreloading(false, preloadSkipped_ ? PreloadEnd::Skipped : PreloadEnd::Loaded);
         return;
     }
     if (line.startsWith(QLatin1String("tt-job-done "))) {
@@ -100,11 +133,13 @@ void TranslateEngine::onLine(const QString& line) {
 
 void TranslateEngine::onProcessFinished(int exitCode, bool cancelled) {
     // The engine ended (killed after a cancel, or crashed): its model is gone.
+    setPreloading(false);
     setLoaded(QString());
     if (job_) endJob(exitCode == 0 ? 1 : exitCode, cancelled || cancelRequested_);
 }
 
 void TranslateEngine::onFailedToStart() {
+    setPreloading(false);
     setLoaded(QString());
     killTimer_.stop();
     if (!job_) return;
