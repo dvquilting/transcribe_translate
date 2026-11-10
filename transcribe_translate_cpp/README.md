@@ -46,6 +46,15 @@ on Linux its static libraries' symbols stay local (`--exclude-libs,ALL`,
 its own symbol table anyway. `build_all.sh` checks that the library exports
 no `ggml_`/`llama_` symbols. The library is loaded only by `tt_engine translate`.
 
+The Translate tab runs `tt_engine translate --serve` (`src/gui/translate_engine.*`):
+one engine for all its jobs, which keeps the model (and the faster mode's helper)
+loaded, so a second translation starts without loading 10 GB again. Jobs go in
+on stdin (`job<TAB>args`, `cancel`, `unload`, `quit`); each ends with a
+`tt-job-done <code>` line, and `tt-model <name>` says what stays loaded. Another
+tab's job, **Free GPU memory**, **Model files** and closing the window end the
+engine. A cancelled job stops at once; if it doesn't within 4 s (a download,
+loading), the engine is ended.
+
 PDFs never reach the engine. The window writes them with Qt's `QPdfWriter`
 (system fonts embedded, every script shaped). It reads them with PDFium
 (`pdfium.dll` / `libpdfium.so` from [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries),

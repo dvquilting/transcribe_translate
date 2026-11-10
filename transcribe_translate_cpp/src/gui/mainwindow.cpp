@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "translate_engine.h"
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -61,7 +62,7 @@ MainWindow::MainWindow(const QString& historyFile, QWidget* parent)
     tabs_->setTabToolTip(2, tr("Audio or video to translated subtitles, and a dubbed soundtrack"));
     tabs_->setTabToolTip(3, tr("The jobs run so far, and the files they saved"));
 
-    // Help, Model files and Quit: for every tab, next to the tabs.
+    // Help, Free GPU memory, Model files and Quit: for every tab, next to the tabs.
     auto* corner = new QWidget;
     auto* ch = new QHBoxLayout(corner);
     ch->setContentsMargins(0, 0, 0, 2);
@@ -74,18 +75,27 @@ MainWindow::MainWindow(const QString& historyFile, QWidget* parent)
     modelsBtn_ = new QPushButton(tr("Model files"));
     modelsBtn_->setToolTip(tr("Show the downloaded models and where they are (and delete them)"));
     connect(modelsBtn_, &QPushButton::clicked, this, &MainWindow::showModels);
+    // The Translate tab keeps its model loaded between jobs (translate_engine.h).
+    freeGpuBtn_ = new QPushButton(tr("Free GPU memory"));
+    connect(freeGpuBtn_, &QPushButton::clicked, this, [] { tt::TranslateEngine::instance().release(); });
+    connect(&tt::TranslateEngine::instance(), &tt::TranslateEngine::loadedChanged, this, &MainWindow::updateFreeGpu);
     auto* quit = new QPushButton(tr("Quit"));
     quit->setShortcut(QKeySequence::Quit);  // Ctrl+Q
     quit->setToolTip(tr("Close the program (asks first if a job is running)"));
     connect(quit, &QPushButton::clicked, this, &QWidget::close);
     ch->addWidget(help);
+    ch->addWidget(freeGpuBtn_);
     ch->addWidget(modelsBtn_);
     ch->addWidget(quit);
     tabs_->setCornerWidget(corner, Qt::TopRightCorner);
     root->addWidget(tabs_);
 
     // No deleting a model while a job may be using it.
-    connect(&tt::JobGate::instance(), &tt::JobGate::changed, modelsBtn_, [this](bool busy) { modelsBtn_->setEnabled(!busy); });
+    connect(&tt::JobGate::instance(), &tt::JobGate::changed, modelsBtn_, [this](bool busy) {
+        modelsBtn_->setEnabled(!busy);
+        updateFreeGpu();
+    });
+    updateFreeGpu();
 
     connect(transcribe_, &TranscribePage::jobFinished, history_, &HistoryPage::add);
     connect(translate_, &TranslatePage::jobFinished, history_, &HistoryPage::add);
@@ -143,15 +153,32 @@ QString MainWindow::helpHtml() {
         "the same input again).</li>"
         "</ul>"
         "<p>One job runs at a time, so each model has the graphics card to itself; the other tabs can be set up "
-        "meanwhile. Dropping a file onto a tab chooses it as that tab's input.</p><hr>");
+        "meanwhile. Dropping a file onto a tab chooses it as that tab's input.</p>"
+        "<p>The Translate tab keeps its model loaded on the graphics card after a translation, so the next one "
+        "starts at once instead of loading the model again. <b>Free GPU memory</b> unloads it, for a game or "
+        "another program that needs the graphics card; it is also unloaded when another tab starts a job, before "
+        "<b>Model files</b> opens, and when the program closes.</p><hr>");
     h += TranscribePage::helpHtml() + QStringLiteral("<hr>");
     h += TranslatePage::helpHtml() + QStringLiteral("<hr>");
     h += SpeechPage::helpHtml();
     return h;
 }
 
+void MainWindow::updateFreeGpu() {
+    const QString model = tt::TranslateEngine::instance().loadedModel();
+    freeGpuBtn_->setEnabled(!model.isEmpty() && !tt::JobGate::instance().busy());
+    freeGpuBtn_->setToolTip(
+        model.isEmpty()
+            ? tr("Frees the graphics card's memory when Translate keeps a model loaded for the next translation "
+                 "(nothing is loaded now)")
+            : tr("%1 stays loaded on the graphics card after a translation, so the next one starts at once. "
+                 "This frees its memory for other programs (it is freed anyway when another tab starts a job, "
+                 "or when this program closes).").arg(model));
+}
+
 void MainWindow::showModels() {
     if (tt::JobGate::instance().busy()) return;
+    tt::TranslateEngine::instance().release();  // a loaded model's file can't be deleted (Windows)
     // Only these programs' own downloads count as ours: CrispASR marks each with
     // a .src sidecar, Translate's are its model files.
     pk::ModelOwner translate;

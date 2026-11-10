@@ -27,6 +27,7 @@
 #include "speech_page.h"
 #include "transcribe_page.h"
 #include "translate_page.h"
+#include "translate_engine.h"
 
 static int failures = 0;
 #define CHECK(x)                                                              \
@@ -76,7 +77,7 @@ int main(int argc, char** argv) {
     QStandardPaths::setTestModeEnabled(true);
     QApplication app(argc, argv);
     const bool pdfium = tt::pdfiumProblem().isEmpty();  // reading PDFs (TT_PDFIUM)
-    const int jobs = pdfium ? 5 : 4;                     // in the History at the end
+    const int jobs = pdfium ? 7 : 6;                     // in the History at the end
     QApplication::setOrganizationName(QStringLiteral("DavidV"));
     QApplication::setApplicationName(QStringLiteral("TranscribeTranslateTest"));
     QApplication::setApplicationDisplayName(QStringLiteral("Transcribe & Translate"));
@@ -176,6 +177,10 @@ int main(int argc, char** argv) {
             CHECK(shown);
         }
         CHECK(w.historyPage()->jobs().size() == 2 && w.historyPage()->jobs().value(0).kind == QStringLiteral("Translate"));
+        // The engine stays running with its model, for the next translation.
+        CHECK(tt::TranslateEngine::instance().loadedModel() == QStringLiteral("Fake model"));
+        QPushButton* freeGpu = button(&w, QStringLiteral("Free GPU memory"));
+        CHECK(freeGpu && freeGpu->isEnabled());
 
         // ---- one job at a time ----
         qputenv("TT_FAKE_SLEEP_MS", "1500");
@@ -186,6 +191,9 @@ int main(int argc, char** argv) {
         click(tp, QStringLiteral("Transcribe"));
         CHECK(tp->isRunning() && tt::JobGate::instance().busy());
         CHECK(tt::JobGate::instance().owner() == QStringLiteral("Transcribe"));
+        // Another tab's job frees the Translate tab's model first.
+        CHECK(tt::TranslateEngine::instance().loadedModel().isEmpty());
+        CHECK(freeGpu && !freeGpu->isEnabled());
         QPushButton* models = button(&w, QStringLiteral("Model files"));
         CHECK(models && !models->isEnabled());
         // The Speech translation tab is told to wait: a message, no second engine.
@@ -257,6 +265,30 @@ int main(int argc, char** argv) {
                 CHECK(j.kind == QStringLiteral("Translate") && j.ok && QFileInfo(j.input) == QFileInfo(srcPdf));
                 CHECK(j.outputs.size() == 1 && QFileInfo(j.outputs.value(0)) == QFileInfo(dePdf));
             }
+        }
+
+        // ---- the model kept loaded: two translations, one engine; then Free GPU memory ----
+        {
+            tabs->setCurrentIndex(1);
+            const int serversBefore = (int)fakeRuns(log + QStringLiteral(".serve")).size();
+            QLineEdit* outEdit = nullptr;
+            for (QLineEdit* e : lp->findChildren<QLineEdit*>())
+                if (e->placeholderText().startsWith(QStringLiteral("(default: next to the input"))) outEdit = e;
+            CHECK(outEdit);
+            for (int i = 0; i < 2 && outEdit; ++i) {
+                lp->openFile(txt);
+                outEdit->setText(work.filePath(QStringLiteral("again%1.de.txt").arg(i)));
+                click(lp, QStringLiteral("Translate file"));
+                CHECK(waitFor([&] { return !lp->isRunning(); }));
+                CHECK(readText(work.filePath(QStringLiteral("again%1.de.txt").arg(i))).startsWith(QStringLiteral("[de] Good morning")));
+            }
+            // At most one engine started for the two (none if the PDF's was still running).
+            CHECK((int)fakeRuns(log + QStringLiteral(".serve")).size() - serversBefore <= 1);
+            CHECK(tt::TranslateEngine::instance().loadedModel() == QStringLiteral("Fake model"));
+            CHECK(freeGpu && freeGpu->isEnabled());
+            if (freeGpu) freeGpu->click();
+            CHECK(tt::TranslateEngine::instance().loadedModel().isEmpty());
+            CHECK(freeGpu && !freeGpu->isEnabled());
         }
 
         // Pictures of the tabs, for a look at the layout: TT_SCREENSHOTS=<folder>.

@@ -46,5 +46,7 @@ private:
     SpeechPage* speech_ = nullptr;
     HistoryPage* history_ = nullptr;
     QPushButton* modelsBtn_ = nullptr;
+    QPushButton* freeGpuBtn_ = nullptr;  // ends the Translate tab's engine and its loaded model
+    void updateFreeGpu();
     QSettings settings_;
 };

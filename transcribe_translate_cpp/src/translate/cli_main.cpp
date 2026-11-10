@@ -5,10 +5,26 @@
 //   progress: <phase> <done>/<total> <unit>
 //   Engine: <backend> (<device>)        Detected: <code>
 //   wrote <path>
+//
+// "tt_engine translate --serve" keeps the model loaded between jobs (the window
+// uses it for the Translate tab): it reads commands from stdin, one per line -
+//   job<TAB>ARG<TAB>ARG...   a translation, with the arguments of one run
+//                            (escaped: \\ \t \n \r)
+//   cancel                   stop the running job
+//   unload                   free the model (and the graphics memory)
+//   quit                     (or end of input) exit
+// and answers, besides each job's own lines:
+//   tt-model <name>          the model now kept loaded ("" = none)
+//   tt-job-done <code>       the job ended with this exit code (0, 3 = partial, 1 ...)
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <iostream>
+#include <mutex>
+#include <thread>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
@@ -64,10 +80,39 @@ struct Args {
     bool verbose = false;
 };
 
+// --serve: a job ends by throwing this instead of exiting the process.
+bool g_serving = false;
+struct JobEnd {
+    int code;
+};
+std::atomic<bool> g_cancel{false};  // set by "cancel" (--serve)
+
+// The model kept loaded between jobs (--serve), with what it was loaded for.
+struct LoadedModel {
+    std::string key;  // model, draft model, device, threads, context ... (see translate_main)
+    std::string display;
+    std::unique_ptr<Llm> llm;
+    std::string note;
+} g_loaded;
+
+void say(const std::string& s);
+
+void unload_model() {
+    if (!g_loaded.llm) return;
+    g_loaded = LoadedModel();
+    if (g_serving) say("tt-model ");
+}
+
+[[noreturn]] void leave(int code) {
+    std::fflush(stdout);
+    std::fflush(stderr);
+    if (g_serving) throw JobEnd{code};
+    std::exit(code);
+}
+
 [[noreturn]] void die(const std::string& msg, int code = 1) {
     std::fprintf(stderr, "Error: %s\n", msg.c_str());
-    std::fflush(stderr);
-    std::exit(code);
+    leave(code);
 }
 
 void say(const std::string& s) {
@@ -145,9 +190,9 @@ Args parse_args(const std::vector<std::string>& av) {
     };
     for (size_t i = 1; i < av.size(); ++i) {
         const std::string& o = av[i];
-        if (o == "-h" || o == "--help") print_usage(), std::exit(0);
-        else if (o == "--list-models") list_models(), std::exit(0);
-        else if (o == "--list-languages") list_languages(), std::exit(0);
+        if (o == "-h" || o == "--help") print_usage(), leave(0);
+        else if (o == "--list-models") list_models(), leave(0);
+        else if (o == "--list-languages") list_languages(), leave(0);
         else if (o == "-t" || o == "--to") a.target = need(i);
         else if (o == "-s" || o == "--from") a.source = need(i);
         else if (o == "-m" || o == "--model") a.model = need(i);
@@ -169,7 +214,7 @@ Args parse_args(const std::vector<std::string>& av) {
         else if (a.input.empty()) a.input = o;
         else die("unexpected argument " + o, 2);
     }
-    if (a.input.empty() && a.text.empty()) print_usage(), std::exit(2);
+    if (a.input.empty() && a.text.empty()) print_usage(), leave(2);
     if (a.target.empty()) die("choose the target language with -t (see --list-languages)", 2);
     if (!find_language(a.target)) die("unknown target language '" + a.target + "' (see --list-languages)", 2);
     if (a.source != "auto" && !find_language(a.source))
@@ -411,7 +456,6 @@ int translate_main(const std::vector<std::string>& av) {
         const auto t0 = std::chrono::steady_clock::now();
         const std::string model_path = ensure_model(model, args);
         const std::string draft_path = ensure_draft(model, model_path, args);
-        say("Loading " + model.display + " ...");
         EngineOptions eo;
         eo.draft_model_path = draft_path;
         eo.draft_max = args.draft_max;
@@ -421,8 +465,33 @@ int translate_main(const std::vector<std::string>& av) {
         eo.threads = args.threads;
         eo.n_ctx = args.ctx > 0 ? args.ctx : model.n_ctx;
         eo.verbose = args.verbose;
+        // --serve: the model loaded for the last job, if it was loaded the same way.
+        const std::string key = model_path + '\n' + draft_path + '\n' + eo.device + '\n' + std::to_string(eo.threads) +
+                                '\n' + std::to_string(eo.n_ctx) + '\n' + std::to_string(eo.draft_max) + '\n' +
+                                (eo.draft_on_cpu ? "1" : "0") + (eo.verbose ? "1" : "0");
+        std::unique_ptr<Llm> own;
+        Llm* llm_ptr = nullptr;
         std::string note;
-        Llm llm(model_path, eo, &note);
+        if (g_serving && g_loaded.llm && g_loaded.key == key) {
+            say("Loading " + model.display + " ... (kept loaded from the last translation)");
+            llm_ptr = g_loaded.llm.get();
+            note = g_loaded.note;
+        } else {
+            unload_model();  // first, so both never take graphics memory at once
+            say("Loading " + model.display + " ...");
+            own = std::make_unique<Llm>(model_path, eo, &note);
+            llm_ptr = own.get();
+            if (g_serving) {
+                g_loaded.key = key;
+                g_loaded.display = model.display;
+                g_loaded.note = note;
+                g_loaded.llm = std::move(own);
+                say("tt-model " + model.display);
+            }
+        }
+        Llm& llm = *llm_ptr;
+        llm.set_cancel_flag(&g_cancel);
+        llm.reset_draft_stats();
         if (!note.empty()) say("Note: " + note);
         say("Engine: " + describe_engine(llm.engine()));
         say("Placement: " + llm.engine().placement);
@@ -568,8 +637,92 @@ int translate_main(const std::vector<std::string>& av) {
 #else
 #define TT_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
+namespace {
+
+std::vector<std::string> split_job(const std::string& line) {
+    std::vector<std::string> out{"translate"};
+    std::string cur;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char c = line[i];
+        if (c == '\t') {
+            out.push_back(cur);
+            cur.clear();
+        } else if (c == '\\' && i + 1 < line.size()) {
+            const char n = line[++i];
+            cur += n == 't' ? '\t' : n == 'n' ? '\n' : n == 'r' ? '\r' : n;
+        } else {
+            cur += c;
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+
+// "translate --serve": jobs from stdin, with the model kept loaded between them.
+int serve() {
+    g_serving = true;
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<std::vector<std::string>> jobs;
+    bool unload = false, done = false;
+    // stdin is read on its own thread, so "cancel" arrives while a job runs.
+    std::thread reader([&] {
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line == "cancel") {
+                g_cancel = true;
+                continue;
+            }
+            std::lock_guard<std::mutex> lock(m);
+            if (line == "quit") break;
+            if (line == "unload") unload = true;
+            else if (line.rfind("job\t", 0) == 0) jobs.push_back(split_job(line.substr(4)));
+            cv.notify_one();
+        }
+        std::lock_guard<std::mutex> lock(m);
+        done = true;
+        cv.notify_one();
+    });
+    for (;;) {
+        std::vector<std::string> job;
+        {
+            std::unique_lock<std::mutex> lock(m);
+            cv.wait(lock, [&] { return unload || done || !jobs.empty(); });
+            if (unload) {
+                unload = false;
+                lock.unlock();
+                unload_model();
+                continue;
+            }
+            if (jobs.empty()) break;  // done
+            job = std::move(jobs.front());
+            jobs.pop_front();
+        }
+        g_cancel = false;
+        int code = 1;
+        try {
+            code = translate_main(job);
+        } catch (const JobEnd& e) {
+            code = e.code;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "Error: %s\n", e.what());
+        }
+        std::fflush(stderr);
+        std::printf("tt-job-done %d\n", code);
+        std::fflush(stdout);
+    }
+    unload_model();
+    reader.join();
+    return 0;
+}
+
+}  // namespace
+
 TT_EXPORT int tt_translate_main(int argc, const char* const* argv) {
-    const int code = translate_main(std::vector<std::string>(argv, argv + argc));
+    const int code = argc >= 2 && std::string(argv[1]) == "--serve"
+                         ? serve()
+                         : translate_main(std::vector<std::string>(argv, argv + argc));
     // This library has its own C runtime (and stdout buffer) on Windows: flush it
     // before going back to tt_engine.
     std::fflush(stdout);

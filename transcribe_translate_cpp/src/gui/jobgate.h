@@ -30,7 +30,9 @@ public:
     QString owner() const { return owner_; }  // the tab whose job is running
     // True when no job is running; otherwise tells the user which tab is busy.
     bool checkFree(QWidget* parent) const;
-    void acquire(const QString& owner);
+    // `keepTranslateEngine`: the job runs in the Translate tab's engine, which
+    // keeps its model; any other job first frees it (TranslateEngine::release).
+    void acquire(const QString& owner, bool keepTranslateEngine = false);
     void release();
 
 signals:

@@ -93,6 +93,8 @@ private:
         std::vector<int> prompt;  // the whole prompt, as generate() takes it
     };
     Result run(const std::string& text, const std::string& context, const Tokenized* tok = nullptr);
+    int max_tokens_for(int text_tokens) const;
+    int allowed_repeats_for(const std::string& text) const;
     Result translate_long_unit(const std::string& unit, const std::string& context);
     bool fits(const std::string& text, const std::string& context, Tokenized* tok = nullptr);
     int tokens(const std::string& text);

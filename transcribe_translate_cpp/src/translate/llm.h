@@ -118,6 +118,7 @@ public:
     // Why a draft model that was asked for isn't used (empty when it is).
     const std::string& draft_info() const { return draft_info_; }
     const DraftStats& draft_stats() const { return draft_stats_; }
+    void reset_draft_stats() { draft_stats_ = DraftStats(); }  // per job, for a model kept loaded
 
     // While *flag is true, generation stops as soon as possible (throws "cancelled").
     void set_cancel_flag(const std::atomic<bool>* flag) { cancel_ = flag; }

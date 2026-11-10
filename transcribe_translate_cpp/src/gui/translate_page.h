@@ -3,12 +3,14 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QPointer>
 #include <QSettings>
 #include <QStringList>
 #include <QWidget>
 
 #include "child_process.h"  // ../qt
 #include "jobgate.h"
+#include "translate_engine.h"
 
 class QCheckBox;
 class QComboBox;
@@ -31,7 +33,7 @@ public:
     void openFile(const QString& path);  // switch to the File tab with this input
     static QString helpHtml();  // this tab's part of the Help window
     QString modelsDir() const;  // the models folder chosen under Advanced ("" = the default)
-    bool isRunning() const { return runner_.isActive(); }
+    bool isRunning() const { return job_ != nullptr; }
     void shutdown();            // the window is closing: stop the job, save the settings
 
 signals:
@@ -111,7 +113,7 @@ private:
     // state
     QSettings settings_;
     // tt_engine translate; its arguments are built once, when the run starts.
-    pk::ChildProcess runner_;
+    QPointer<tt::EngineJob> job_;  // the job in the engine that keeps the model loaded (translate_engine.h)
     Mode mode_ = Mode::None;
     QTemporaryDir* tempDir_ = nullptr;
     QString textOutput_;   // output file of a text-box run
@@ -127,6 +129,7 @@ private:
     QString lastError_;
     QString engineHtml_;  // the Compute line without the faster mode's note
     QString draftNote_;   // the faster mode's note for this run
+    QString engineNotes() const;  // the notes after the Compute line
     bool downloading_ = false;
     QElapsedTimer clock_;           // whole run
     qint64 translateStartMs_ = -1;  // clock_ time when translation began (after loading)

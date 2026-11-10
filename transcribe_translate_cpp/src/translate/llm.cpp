@@ -215,47 +215,55 @@ Llm::Llm(const std::string& model_path, const EngineOptions& opts, std::string* 
 #ifndef TL_NO_GPU_FIT
     if (!devs.empty()) {
         std::vector<size_t> margins(llama_max_devices(), (size_t)768 * 1024 * 1024);  // keep 768 MB free
-        const auto level = opts.verbose ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR;
-        // With the draft model: fit both, then the model alone, and keep the draft
-        // model only if the model's placement stays the same. Every layer the
-        // draft model pushes onto the processor slows each step, drafted or not,
-        // and the processor works through a draft's tokens one by one, so a split
-        // model (TranslateGemma 27B on 16 GB) loses more than drafting saves.
-        // Both models' runtime buffers on top of the estimate: a second context
-        // needs some memory of its own (an extra 512 MB of headroom).
+        // A second context (the draft model's) needs some memory of its own: 512 MB more headroom.
         std::vector<size_t> margins_d = margins;
         for (size_t& m : margins_d) m += (size_t)512 * 1024 * 1024;
-        llama_model_params mp_d = mp;
-        llama_context_params cp_d = cp;
-        std::vector<float> split_d(tensor_split.size(), 0.0f);
-        std::vector<llama_model_tensor_buft_override> overrides_d(overrides.size(), {nullptr, nullptr});
-        if (use_draft) {
-            common_fit_extra_model extra{opts.draft_model_path.c_str(), &dmp, &dcp, false};
-            const auto st = common_fit_params(model_path.c_str(), &mp_d, &cp_d, split_d.data(), overrides_d.data(),
-                                              margins_d.data(), cp.n_ctx, &extra, level);
-            if (st == COMMON_PARAMS_FIT_STATUS_ERROR) throw std::runtime_error("could not read model file " + model_path);
-        }
+        const auto level = opts.verbose ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR;
+        auto n_overrides = [](const std::vector<llama_model_tensor_buft_override>& v) {
+            return std::count_if(v.begin(), v.end(), [](const auto& o) { return o.pattern != nullptr; });
+        };
+
+        // The model alone first. Then the draft model, kept only if the model's
+        // placement stays the same: every layer pushed onto the processor slows
+        // each step more than drafting saves (the processor works through a
+        // step's tokens one by one).
         const auto st = common_fit_params(model_path.c_str(), &mp, &cp, tensor_split.data(), overrides.data(),
                                           margins.data(), cp.n_ctx, nullptr, level);
         if (st == COMMON_PARAMS_FIT_STATUS_ERROR) throw std::runtime_error("could not read model file " + model_path);
-        if (use_draft) {
-            auto n_overrides = [](const std::vector<llama_model_tensor_buft_override>& v) {
-                return std::count_if(v.begin(), v.end(), [](const auto& o) { return o.pattern != nullptr; });
-            };
-            const bool same = mp_d.n_gpu_layers == mp.n_gpu_layers && split_d == tensor_split &&
-                              n_overrides(overrides_d) == n_overrides(overrides);
-            if (cp_d.n_ctx == cp.n_ctx && same) {
-                // (mp_d points into split_d / overrides_d; swapping keeps the buffers.)
-                mp = mp_d;
-                cp = cp_d;
-                tensor_split.swap(split_d);
-                overrides.swap(overrides_d);
-            } else {
+
+        // Fit (cp_t, with the draft model if `draft`); true and taken if the placement holds.
+        auto try_fit = [&](llama_context_params cp_t, bool draft) {
+            llama_model_params mp_t = mp;
+            std::vector<float> split_t(tensor_split.size(), 0.0f);
+            std::vector<llama_model_tensor_buft_override> overrides_t(overrides.size(), {nullptr, nullptr});
+            llama_model_params dmp_t = dmp;
+            llama_context_params dcp_t = dcp;
+            common_fit_extra_model extra{opts.draft_model_path.c_str(), &dmp_t, &dcp_t, false};
+            const uint32_t want_ctx = cp_t.n_ctx;
+            const auto st_t = common_fit_params(model_path.c_str(), &mp_t, &cp_t, split_t.data(), overrides_t.data(),
+                                                draft ? margins_d.data() : margins.data(), want_ctx,
+                                                draft ? &extra : nullptr, level);
+            if (st_t == COMMON_PARAMS_FIT_STATUS_ERROR || cp_t.n_ctx != want_ctx ||
+                mp_t.n_gpu_layers != mp.n_gpu_layers || split_t != tensor_split ||
+                n_overrides(overrides_t) != n_overrides(overrides))
+                return false;
+            // (mp_t points into split_t / overrides_t; swapping keeps the buffers.)
+            mp = mp_t;
+            cp = cp_t;
+            tensor_split.swap(split_t);
+            overrides.swap(overrides_t);
+            return true;
+        };
+        // The draft model (speculative decoding), with whatever is fitted already.
+        auto add_draft = [&] {
+            if (!use_draft) return;
+            if (!try_fit(cp, true)) {
                 use_draft = false;
                 draft_info_ = "not used: the model and the draft model don't both fit in the graphics card's memory "
                               "(it would push part of the model onto the processor, which is slower)";
             }
-        }
+        };
+        add_draft();
     }
 #endif
 
@@ -465,6 +473,25 @@ std::vector<llama_token> prompt_tokens(const llama_vocab* vocab, const Prompt& p
 }
 
 }  // namespace
+
+// The tokens' text. Cutting at max_tokens or at a loop can stop in the middle
+// of a character (byte-level tokens): the fragment is dropped rather than
+// written as broken UTF-8.
+static std::string detokenize(const llama_vocab* vocab, const std::vector<int>& out) {
+    std::string text;
+    char buf[256];
+    for (int t : out) {
+        int m = llama_token_to_piece(vocab, t, buf, sizeof(buf), 0, false);
+        if (m < 0) {
+            std::string big(-m, '\0');
+            m = llama_token_to_piece(vocab, t, big.data(), (int32_t)big.size(), 0, false);
+            text.append(big.data(), std::max(0, m));
+        } else {
+            text.append(buf, m);
+        }
+    }
+    return sanitize_utf8(text);
+}
 
 int Llm::count_prompt_tokens(const Prompt& prompt, bool add_bos) const {
     return (int)prompt_tokens(llama_model_get_vocab(model_), prompt, add_bos).size();
@@ -712,22 +739,9 @@ Generation Llm::generate(const Prompt& prompt, bool add_bos, int max_tokens, con
     }
 
     g.generated_tokens = (int)out.size();
-    std::string text;
-    char buf[256];
-    for (int t : out) {
-        int m = llama_token_to_piece(vocab, t, buf, sizeof(buf), 0, false);
-        if (m < 0) {
-            std::string big(-m, '\0');
-            m = llama_token_to_piece(vocab, t, big.data(), (int32_t)big.size(), 0, false);
-            text.append(big.data(), std::max(0, m));
-        } else {
-            text.append(buf, m);
-        }
-    }
-    // Cutting at max_tokens or at a loop can stop in the middle of a character
-    // (byte-level tokens): drop the fragment rather than write broken UTF-8.
-    g.text = sanitize_utf8(text);
+    g.text = detokenize(vocab, out);
     return g;
 }
+
 
 }  // namespace tl

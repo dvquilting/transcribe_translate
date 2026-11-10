@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -43,8 +44,48 @@ const char* kSrt = "1\n00:00:01,000 --> 00:00:03,000\nGood morning, everyone.\n\
 
 }  // namespace
 
+int run(const std::vector<std::string>& a);
+
+// "translate --serve": jobs from stdin, as the real engine (translate/cli_main.cpp).
+int serve() {
+    if (const char* log = std::getenv("TT_FAKE_LOG")) std::ofstream(std::string(log) + ".serve", std::ios::app) << "serve\n";
+    bool loaded = false;
+    for (std::string line; std::getline(std::cin, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line == "quit") break;
+        if (line == "unload") {
+            if (loaded) say("tt-model ");
+            loaded = false;
+            continue;
+        }
+        if (line.rfind("job\t", 0) != 0) continue;  // (cancel: the jobs here are instant)
+        std::vector<std::string> args{"translate"};
+        std::string cur;
+        for (size_t i = 4; i < line.size(); ++i) {
+            if (line[i] == '\t') args.push_back(cur), cur.clear();
+            else if (line[i] == '\\' && i + 1 < line.size()) {
+                const char n = line[++i];
+                cur += n == 't' ? '\t' : n == 'n' ? '\n' : n == 'r' ? '\r' : n;
+            } else cur += line[i];
+        }
+        args.push_back(cur);
+        if (!loaded) say("tt-model Fake model");
+        else say("Loading Fake model ... (kept loaded from the last translation)");
+        loaded = true;
+        const int code = run(args);
+        std::fflush(stderr);
+        say("tt-job-done " + std::to_string(code));
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::vector<std::string> a(argv + 1, argv + argc);
+    if (a.size() == 2 && a[0] == "translate" && a[1] == "--serve") return serve();
+    return run(a);
+}
+
+int run(const std::vector<std::string>& a) {
     if (const char* log = std::getenv("TT_FAKE_LOG")) {
         std::ofstream f(log, std::ios::app);
         for (const auto& s : a) f << s << '\t';

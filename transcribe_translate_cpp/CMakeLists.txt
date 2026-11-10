@@ -54,6 +54,7 @@ set(TT_GUI_SOURCES
     src/gui/speech_page.cpp src/gui/speech_page.h
     src/gui/history_page.cpp src/gui/history_page.h
     src/gui/jobgate.cpp src/gui/jobgate.h
+    src/gui/translate_engine.cpp src/gui/translate_engine.h
     src/gui/help.cpp src/gui/help.h
     src/gui/subtitles.cpp src/gui/subtitles.h
     src/gui/pdf_files.cpp src/gui/pdf_files.h src/gui/faster_mode.h

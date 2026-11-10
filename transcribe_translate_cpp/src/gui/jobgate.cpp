@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QMessageBox>
 
+#include "translate_engine.h"
+
 namespace tt {
 
 JobGate& JobGate::instance() {
@@ -20,7 +22,8 @@ bool JobGate::checkFree(QWidget* parent) const {
     return false;
 }
 
-void JobGate::acquire(const QString& owner) {
+void JobGate::acquire(const QString& owner, bool keepTranslateEngine) {
+    if (!keepTranslateEngine) TranslateEngine::instance().release();  // its model would take the graphics card
     owner_ = owner;
     emit changed(true);
 }

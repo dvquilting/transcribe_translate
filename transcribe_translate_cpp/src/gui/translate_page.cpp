@@ -1,4 +1,5 @@
 #include "translate_page.h"
+#include "translate_engine.h"
 #include "faster_mode.h"
 #include "pdf_files.h"
 
@@ -174,17 +175,13 @@ TranslatePage::TranslatePage(QWidget* parent)
     : QWidget(parent), settings_(QStringLiteral("DavidV"), QStringLiteral("TranscribeTranslate")) {
     settings_.beginGroup(QStringLiteral("Translate"));
     setAcceptDrops(true);
-    connect(&runner_, &pk::ChildProcess::outputReceived, this, &TranslatePage::appendLog);
-    connect(&runner_, &pk::ChildProcess::lineReceived, this, &TranslatePage::parseLine);
-    connect(&runner_, &pk::ChildProcess::finished, this, &TranslatePage::processFinished);
-    connect(&runner_, &pk::ChildProcess::failedToStart, this, &TranslatePage::processFailedToStart);
     buildUi();
     loadSettings();
     updateModelInfo();
 }
 
 TranslatePage::~TranslatePage() {
-    runner_.stop();  // before tempDir_ goes: the engine may still be writing into it
+    if (job_) tt::TranslateEngine::instance().shutdown();  // before tempDir_ goes: the engine may still be writing into it
     delete tempDir_;
 }
 
@@ -461,7 +458,7 @@ QStringList TranslatePage::commonArguments() const {
 
 // ------------------------------------------------------------------ text mode
 void TranslatePage::translateText() {
-    if (runner_.isActive()) return;
+    if (job_) return;
     const QString text = sourceEdit_->toPlainText();
     if (text.trimmed().isEmpty()) {
         sourceEdit_->setFocus();
@@ -544,7 +541,7 @@ bool TranslatePage::confirmOverwrite(QString& out) {
 }
 
 void TranslatePage::translateFile() {
-    if (runner_.isActive()) return;
+    if (job_) return;
     QString in = inputEdit_->text().trimmed();
     if (in.size() >= 2 && in.startsWith(QLatin1Char('"')) && in.endsWith(QLatin1Char('"'))) in = in.mid(1, in.size() - 2);
     in = absolutePath(in);
@@ -698,8 +695,17 @@ bool TranslatePage::startProcess(const QStringList& args, Mode mode) {
     clock_.start();
     tick_->start();
     updateTiming();
-    tt::JobGate::instance().acquire(tr("Translate"));
-    runner_.start(cliPath(), QStringList{QStringLiteral("translate")} + args);
+    // In the engine that stays running, so the model stays loaded for the next job.
+    tt::JobGate::instance().acquire(tr("Translate"), true);
+    job_ = tt::TranslateEngine::instance().start(args);
+    if (!job_) {  // (can't happen: one job at a time)
+        processFailedToStart();
+        return false;
+    }
+    connect(job_, &tt::EngineJob::outputReceived, this, &TranslatePage::appendLog);
+    connect(job_, &tt::EngineJob::lineReceived, this, &TranslatePage::parseLine);
+    connect(job_, &tt::EngineJob::finished, this, &TranslatePage::processFinished);
+    connect(job_, &tt::EngineJob::failedToStart, this, &TranslatePage::processFailedToStart);
     return true;
 }
 
@@ -721,7 +727,7 @@ void TranslatePage::setRunning(bool running) {
 QString TranslatePage::modelsDir() const { return absolutePath(modelsDirEdit_->text()); }
 
 void TranslatePage::cancel() {
-    if (runner_.cancel()) statusLabel_->setText(tr("Cancelling..."));
+    if (job_ && tt::TranslateEngine::instance().cancel()) statusLabel_->setText(tr("Cancelling..."));
 }
 
 void TranslatePage::reloadPartial() {
@@ -832,6 +838,7 @@ void TranslatePage::showTranslating() {
 
 // The output has been read to the end (the last line too) when this runs.
 void TranslatePage::processFinished(int exitCode, bool cancelled) {
+    job_ = nullptr;  // (it deletes itself)
     tt::JobGate::instance().release();
     tick_->stop();
     // The PDF, also from a partial translation (exit code 3).
@@ -875,6 +882,7 @@ void TranslatePage::processFinished(int exitCode, bool cancelled) {
 }
 
 void TranslatePage::processFailedToStart() {
+    job_ = nullptr;
     tt::JobGate::instance().release();
     tick_->stop();
     statusLabel_->setText(tr("Could not start tt_engine."));
@@ -897,16 +905,20 @@ void TranslatePage::setEngine(const QString& backend, const QString& detail) {
                        .arg(colour, backend.toHtmlEscaped());
     if (!detail.isEmpty()) html += QStringLiteral(" ") + detail.toHtmlEscaped();
     engineHtml_ = html;
-    engineLabel_->setText(draftNote_.isEmpty() ? html
-                                               : html + QStringLiteral(" &nbsp;\u00B7&nbsp; ") + draftNote_.toHtmlEscaped());
+    engineLabel_->setText(html + engineNotes());
     settings_.setValue(QStringLiteral("lastEngine"), backend);
     settings_.setValue(QStringLiteral("lastEngineDetail"), detail);
 }
 
 void TranslatePage::setDraftNote(const QString& note) {
     draftNote_ = note;  // also when it comes before the Engine line (a note from before loading)
-    if (!engineHtml_.isEmpty())
-        engineLabel_->setText(engineHtml_ + QStringLiteral(" &nbsp;\u00B7&nbsp; ") + note.toHtmlEscaped());
+    if (!engineHtml_.isEmpty()) engineLabel_->setText(engineHtml_ + engineNotes());
+}
+
+QString TranslatePage::engineNotes() const {
+    QString s;
+    if (!draftNote_.isEmpty()) s += QStringLiteral(" &nbsp;\u00B7&nbsp; ") + draftNote_.toHtmlEscaped();
+    return s;
 }
 
 void TranslatePage::resetTiming() {
@@ -990,9 +1002,8 @@ void TranslatePage::saveSettings() {
 
 
 void TranslatePage::shutdown() {
-    if (runner_.isActive()) {
-        runner_.stop();  // disconnected first: nothing reaches the closing window, even if the tool hangs
-        tt::JobGate::instance().release();
-    }
+    if (job_) tt::JobGate::instance().release();
+    // The window closes: end the engine (and free its model), running or not.
+    tt::TranslateEngine::instance().shutdown();
     saveSettings();
 }

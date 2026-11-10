@@ -344,6 +344,17 @@ std::string language_from_answer(const std::string& answer) {
     return "";
 }
 
+// Room for languages that need more tokens than the source (e.g. English -> Hindi).
+int Translator::max_tokens_for(int text_tokens) const { return std::max(64, text_tokens * 3 + 64); }
+
+// A source that repeats a line or phrase three times or more (a song's chorus)
+// is translated with the same repetition: that is not a loop. (One more copy
+// is allowed, for where the token pattern lines up.)
+int Translator::allowed_repeats_for(const std::string& text) const {
+    const int src_reps = source_repetitions(text);
+    return src_reps >= 3 ? src_reps + 1 : 0;
+}
+
 Translator::Result Translator::run(const std::string& text, const std::string& context, const Tokenized* tok) {
     const Prompt prompt = prompts_.translation(text, context);
     Tokenized own;
@@ -352,13 +363,8 @@ Translator::Result Translator::run(const std::string& text, const std::string& c
         own.prompt = llm_.tokenize_prompt(prompt, prompts_.add_bos());
         tok = &own;
     }
-    // Room for languages that need more tokens than the source (e.g. English -> Hindi).
-    const int max_tokens = std::max(64, tok->text * 3 + 64);
-    // A source that repeats a line or phrase three times or more (a song's
-    // chorus) is translated with the same repetition: that is not a loop.
-    // (One more copy is allowed, for where the token pattern lines up.)
-    const int src_reps = source_repetitions(text);
-    const int allowed = src_reps >= 3 ? src_reps + 1 : 0;
+    const int max_tokens = max_tokens_for(tok->text);
+    const int allowed = allowed_repeats_for(text);
 
     // Progress while the model writes: its output so far against the source's
     // length (translations run about as long, give or take a language).
@@ -376,7 +382,7 @@ Translator::Result Translator::run(const std::string& text, const std::string& c
 
     Sampling greedy;
     if (model_.family == Family::HyMT) greedy.repeat_penalty = 1.05f;  // Tencent's recommendation
-    Generation g = llm_.generate(prompt, prompts_.add_bos(), max_tokens, greedy, allowed, &tok->prompt);
+    const Generation g = llm_.generate(prompt, prompts_.add_bos(), max_tokens, greedy, allowed, &tok->prompt);
     if (debug_)
         std::fprintf(stderr, "----- prompt (%d tokens) -----\n%s\n----- answer (%d tokens%s%s) -----\n%s\n-----\n",
                      g.prompt_tokens, prompt.str().c_str(), g.generated_tokens, g.looped ? ", looped" : "",
@@ -543,6 +549,40 @@ std::vector<std::string> Translator::translate_units(const std::vector<std::stri
         if (progress) progress((int)p + 1, (int)pieces.size());
     };
 
+    // A piece's translation into its units: the model's paragraphs, one per unit;
+    // where they don't match, the piece is redone unit by unit.
+    auto finish = [&](const Piece& piece, const Result& r) {
+        std::vector<std::string> parts = split_blank_lines(r.text);
+        if (piece.idx.size() == 1) {
+            // One unit: blank lines the model added are not paragraph breaks here.
+            std::string one;
+            for (const auto& s : parts) one += (one.empty() ? "" : "\n") + s;
+            parts = {one};
+        }
+        if (parts.size() == piece.idx.size() && (r.ok || piece.idx.size() == 1)) {
+            if (!r.ok) ++stats_.problems;
+            for (size_t k = 0; k < parts.size(); ++k) {
+                result[piece.idx[k]] = r.ok ? parts[k] : units[piece.idx[k]];
+                if (unit_done) unit_done(piece.idx[k], result[piece.idx[k]]);
+            }
+        } else {
+            // The model merged or split paragraphs, or a batch of several failed
+            // (looped or cut off): redo this piece unit by unit, so one bad
+            // paragraph doesn't cost the others their translation.
+            ++stats_.split_retries;
+            std::string ctx = want_context ? context : "";
+            for (size_t i : piece.idx) {
+                Result u = translate_long_unit(units[i], ctx);
+                if (!u.ok) ++stats_.problems;
+                std::string one;
+                for (const auto& s : split_blank_lines(u.text)) one += (one.empty() ? "" : "\n") + s;
+                result[i] = u.ok ? one : units[i];
+                if (unit_done) unit_done(i, result[i]);
+                if (want_context) ctx = tail(units[i]);
+            }
+        }
+    };
+
     for (size_t p = 0; p < pieces.size(); ++p) {
         const Piece& piece = pieces[p];
         piece_w_ = piece.tokens;
@@ -568,36 +608,7 @@ std::vector<std::string> Translator::translate_units(const std::vector<std::stri
                 piece_finished(p);
                 continue;
             }
-            Result r = run(joined, want_context ? context : "", &tok);
-            std::vector<std::string> parts = split_blank_lines(r.text);
-            if (piece.idx.size() == 1) {
-                // One unit: blank lines the model added are not paragraph breaks here.
-                std::string one;
-                for (const auto& s : parts) one += (one.empty() ? "" : "\n") + s;
-                parts = {one};
-            }
-            if (parts.size() == piece.idx.size() && (r.ok || piece.idx.size() == 1)) {
-                if (!r.ok) ++stats_.problems;
-                for (size_t k = 0; k < parts.size(); ++k) {
-                    result[piece.idx[k]] = r.ok ? parts[k] : units[piece.idx[k]];
-                    if (unit_done) unit_done(piece.idx[k], result[piece.idx[k]]);
-                }
-            } else {
-                // The model merged or split paragraphs, or a batch of several failed
-                // (looped or cut off): redo this piece unit by unit, so one bad
-                // paragraph doesn't cost the others their translation.
-                ++stats_.split_retries;
-                std::string ctx = want_context ? context : "";
-                for (size_t i : piece.idx) {
-                    Result u = translate_long_unit(units[i], ctx);
-                    if (!u.ok) ++stats_.problems;
-                    std::string one;
-                    for (const auto& s : split_blank_lines(u.text)) one += (one.empty() ? "" : "\n") + s;
-                    result[i] = u.ok ? one : units[i];
-                    if (unit_done) unit_done(i, result[i]);
-                    if (want_context) ctx = tail(units[i]);
-                }
-            }
+            finish(piece, run(joined, want_context ? context : "", &tok));
         }
         if (want_context) {
             std::string src;
