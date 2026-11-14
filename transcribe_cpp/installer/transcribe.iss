@@ -13,7 +13,7 @@
 ; =============================================================================
 
 #define AppName      "Transcribe"
-#define AppVersion   "1.0.0"
+#define AppVersion   "1.1.0"
 #define AppPublisher "David Vickers"
 #define AppExe       "transcribe_multi_gui.exe"
 #define Dist         SourcePath + "..\dist"

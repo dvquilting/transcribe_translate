@@ -70,4 +70,25 @@ std::vector<SrtCue> join_speaker_parts(const std::vector<SrtCue>& cues, const st
 // The same, with the speakers and groups of `map` (matched by the cues' times).
 std::vector<SrtCue> join_speaker_parts(const std::vector<SrtCue>& cues, const SpeakerMap& map);
 
+// As join_speaker_parts(), but with the speakers' names instead of dashes (a
+// transcript's subtitles): "Anna: " starts the text where the speaker changes -
+// the first subtitle of each turn, and each speaker's line in a subtitle with a
+// change in it. Each speaker's text is on one line (wrap it afterwards). With
+// fewer than two speakers in `map` no names are added.
+std::vector<SrtCue> name_speaker_parts(const std::vector<SrtCue>& cues, const SpeakerMap& map);
+
+// What was said as turns: the text of consecutive subtitles by one speaker,
+// joined. A subtitle without a speaker belongs to the turn before it (the
+// first: to the one after).
+struct SpeakerTurnText {
+    int speaker = -1;
+    std::string name;
+    std::string text;
+};
+std::vector<SpeakerTurnText> speaker_turn_texts(const std::vector<SrtCue>& cues, const SpeakerMap& map);
+
+// `more` after `text`, with a space between - except between two CJK
+// characters, which are written without one.
+void append_spoken(std::string* text, const std::string& more);
+
 }  // namespace pk

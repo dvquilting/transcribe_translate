@@ -208,6 +208,41 @@ static void test_speakers() {
     CHECK(plain.size() == 1 && plain[0].text == "Are you coming? Yes.");
     // Cues the map doesn't have stay as they are.
     CHECK(pk::join_speaker_parts({cue(0, 1.5, "x"), cue(2, 4, "y")}, m).size() == 2);
+
+    // A transcript's subtitles: names instead of dashes, where the speaker changes.
+    const auto named = pk::name_speaker_parts(
+        {cue(0, 2, "Are you coming?"), cue(2, 4, "Yes,\nI am."), cue(5, 9, "Good."), cue(10, 12, "Bye.")}, r);
+    CHECK(named.size() == 3);
+    CHECK(named.size() == 3 && named[0].text == "Speaker 1: Are you coming?\nAnna B: Yes, I am." && named[0].end == 4 &&
+          named[0].timing == pk::srt_timing(0, 4));
+    CHECK(named.size() == 3 && named[1].text == "Speaker 1: Good." && named[2].text == "Speaker 3: Bye." &&
+          named[2].index == "3");
+    pk::SpeakerMap two;
+    two.speakers = {{0, "Speaker 1", 4, 0, 2}, {1, "Anna", 2, 4, 6}};
+    two.cues = {{0, 2, 0, 0}, {2, 4, 0, 1}, {4, 6, 1, 2}, {6, 8, 1, 3}, {8, 9, 0, 3}};
+    const std::vector<pk::SrtCue> talk = {cue(0, 2, "One."), cue(2, 4, "<i>Two.</i>"), cue(4, 6, "Three."),
+                                          cue(6, 8, "Four."), cue(8, 9, "Five.")};
+    const auto turnwise = pk::name_speaker_parts(talk, two);
+    CHECK(turnwise.size() == 4);
+    CHECK(turnwise.size() == 4 && turnwise[0].text == "Speaker 1: One." && turnwise[1].text == "<i>Two.</i>" &&
+          turnwise[2].text == "Anna: Three." && turnwise[3].text == "Four.\nSpeaker 1: Five.");
+    const auto turns = pk::speaker_turn_texts(talk, two);
+    CHECK(turns.size() == 3);
+    CHECK(turns.size() == 3 && turns[0].name == "Speaker 1" && turns[0].text == "One. Two." &&
+          turns[1].name == "Anna" && turns[1].text == "Three. Four." && turns[2].text == "Five.");
+    // A subtitle the map doesn't have goes with the turn before it.
+    const auto loose = pk::speaker_turn_texts({cue(0, 2, "One."), cue(2.5, 3.5, "Hm."), cue(4, 6, "Three.")}, two);
+    CHECK(loose.size() == 2 && loose[0].text == "One. Hm.");
+    // One speaker (after a merge): no names.
+    pk::SpeakerMap one = two;
+    pk::merge_speakers(&one, {{1, 0}});
+    const auto unnamed = pk::name_speaker_parts(talk, one);
+    CHECK(unnamed.size() == 4 && unnamed[0].text == "One." && unnamed[3].text == "Four. Five.");
+    // Chinese and Japanese are written without spaces.
+    std::string cjk = "\xE4\xBD\xA0\xE5\xA5\xBD", latin = "caf\xC3\xA9";
+    pk::append_spoken(&cjk, "\xE4\xB8\x96\xE7\x95\x8C");
+    pk::append_spoken(&latin, "\xC3\xA9t\xC3\xA9");
+    CHECK(cjk == "\xE4\xBD\xA0\xE5\xA5\xBD\xE4\xB8\x96\xE7\x95\x8C" && latin == "caf\xC3\xA9 \xC3\xA9t\xC3\xA9");
 }
 
 // The .docx writer: a zip with the Word parts, the text escaped, paragraphs and
@@ -216,7 +251,7 @@ static void test_docx() {
     using V = std::vector<std::string>;
     CHECK(pk::text_paragraphs("a\nb\n\n\n  c  \r\n\r\nd") == (V{"a\nb", "c", "d"}));
     CHECK(pk::text_paragraphs("").empty() && pk::text_paragraphs("\n \n").empty());
-    const std::string d = pk::make_docx({"Talk & more", "[Corrected by AI]", "x < y\nz\n\nnext \x01", "de"});
+    const std::string d = pk::make_docx({"Talk & more", "[Corrected by AI]", "x < y\nz\n\nnext \x01", "de", {}});
     CHECK(d.compare(0, 4, "PK\x03\x04") == 0);
     CHECK(d.find("[Content_Types].xml") != std::string::npos && d.find("word/document.xml") != std::string::npos &&
           d.find("word/styles.xml") != std::string::npos);
@@ -224,6 +259,15 @@ static void test_docx() {
     CHECK(d.find("w:val=\"Subtitle\"/></w:pPr><w:r><w:t xml:space=\"preserve\">[Corrected by AI]") != std::string::npos);
     CHECK(d.find("next </w:t>") != std::string::npos);  // the control character is dropped
     CHECK(d.find("<w:lang w:val=\"de\"/>") != std::string::npos);
+    CHECK(d.find("<w:b/>") == std::string::npos);
+    // Speakers' names at the start of paragraphs are bold (the longest that fits), nowhere else.
+    pk::DocxText talk{"Talk", "", "Anna B: Hello & welcome.\n\nAnna: Hi.\n\nAnd Anna: said so.", "", {}};
+    talk.bold_starts = {"Anna:", "Anna B:"};
+    const std::string t = pk::make_docx(talk);
+    CHECK(t.find("<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space=\"preserve\">Anna B:</w:t></w:r>"
+                 "<w:r><w:t xml:space=\"preserve\"> Hello &amp; welcome.</w:t></w:r>") != std::string::npos);
+    CHECK(t.find("<w:t xml:space=\"preserve\">Anna:</w:t></w:r><w:r><w:t xml:space=\"preserve\"> Hi.</w:t>") != std::string::npos);
+    CHECK(t.find("<w:r><w:t xml:space=\"preserve\">And Anna: said so.</w:t></w:r>") != std::string::npos);
     CHECK(d.compare(d.size() - 22, 4, "PK\x05\x06") == 0);  // the end of the zip
 }
 

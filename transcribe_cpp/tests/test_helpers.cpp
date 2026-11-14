@@ -109,6 +109,14 @@ int main() {
     std::printf("%s", p.c_str());
     CHECK(p == "One. Two? Three! Four. Five.\n\nSix. Seven\n");
 
+    // A number written straight onto the word before it.
+    CHECK(space_before_numbers("In November2024 and May2025, page12.") == "In November 2024 and May 2025, page 12.");
+    CHECK(space_before_numbers("About October3.5 (chapter7) at noon12:30") == "About October 3.5 (chapter 7) at noon 12:30");
+    CHECK(space_before_numbers("\xC3\xA9t\xC3\xA9" "2024") == "\xC3\xA9t\xC3\xA9 2024");  // été2024
+    for (const char* same : {"A4 and mp3, Q3, COVID19, G7", "ipv6 utf8 sha256 base64 web3 IPv4", "the 1990s, 5th, 3D, 10am",
+                             "win64bit x86 H2O", "November 2024", "x-ray2", "\xE7\xAC\xAC" "3"})
+        CHECK(space_before_numbers(same) == same);
+
     // Smart-paragraph helpers
     CHECK((parse_number_list("4, 11 and 19.") == std::vector<int>{4, 11, 19}));
     CHECK(parse_number_list("none").empty());
@@ -118,6 +126,14 @@ int main() {
         std::vector<std::string> s10;
         for (int i = 0; i < 10; ++i) s10.push_back("S" + std::to_string(i) + ".");
         CHECK(join_paragraphs({"A.", "B.", "C."}, {2}) == "A. B.\n\nC.\n");
+        // Several speakers: each turn starts a paragraph with the name; breaks within a turn have none.
+        CHECK(join_speaker_paragraphs({"A.", "B.", "C.", "D.", "E."}, {1, 4}, {{0, "Anna"}, {2, "Ben"}, {3, "Anna"}}) ==
+              "Anna: A.\n\nB.\n\nBen: C.\n\nAnna: D.\n\nE.\n");
+        const std::vector<std::string> labels = {"Anna:", "Anna B:"};
+        CHECK(keeps_speaker_labels("Anna: helo\n\nthere\n\nAnna B: yes", "Anna: Hello.\n\nThere.\n\nAnna B: Yes.", labels));
+        CHECK(!keeps_speaker_labels("Anna: helo\n\nAnna B: yes", "Anna: Hello. Anna B: Yes.", labels));   // a break lost
+        CHECK(!keeps_speaker_labels("Anna: helo\n\nAnna B: yes", "Anna: Hello.\n\nAnna: Yes.", labels));  // a name changed
+        CHECK(!keeps_speaker_labels("helo\n\nyes", "Anna: Hello.\n\nYes.", labels));                     // a name added
         // break at 1 leaves a one-sentence paragraph -> dropped; 9 likewise at the end
         CHECK((tidy_paragraph_breaks({1, 4, 9}, s10, {}, 12, 250) == std::vector<int>{4}));
         // too long -> split in the middle, or at the longest pause
@@ -554,6 +570,62 @@ int main() {
         const auto plain = split_by_speaker(cues, {2, 2, 3, 3}, {});
         CHECK(plain.size() == 4 && plain[0].speaker == 2 && plain[3].speaker == 3);
         CHECK(split_by_speaker({cue(0, 4, "Yes. No.")}, {-1}, {{0, 3.5, 0}, {3.5, 4, 1}}).size() == 1);
+
+        // Quick turns: A asks two short sentences fast, B answers slowly. By the text's
+        // length alone the change falls after "you?" and B would get "I called twice.";
+        // with the word timings each word goes to the speaker heard saying it. A short
+        // overlap of A inside B's answer (0.3 s) changes nothing.
+        {
+            const pk::SrtCue quick = cue(0, 8, "Where were you? I called twice. Sorry. My phone died. I was at the gym all day.");
+            const std::vector<SpeakerTurn> qt = {{0, 1.85, 0}, {1.85, 8, 1}, {3.0, 3.3, 0}};
+            const auto rough = split_by_speaker({quick}, {-1}, {{0, 1.85, 0}, {1.85, 8, 1}});
+            CHECK(rough.size() == 2 && rough[0].text == "Where were you?");  // why the words are needed
+            const std::vector<Word> w = {{"Where", 0, 0.3},   {"were", 0.3, 0.5},  {"you?", 0.5, 0.8},  {"I", 0.9, 1.0},
+                                         {"called", 1.0, 1.3}, {"twice.", 1.3, 1.8}, {"Sorry.", 1.95, 2.6}, {"My", 3.0, 3.2},
+                                         {"phone", 3.2, 3.6}, {"died.", 3.6, 4.1},  {"I", 4.5, 4.6},     {"was", 4.6, 4.8},
+                                         {"at", 4.8, 4.9},    {"the", 4.9, 5.0},    {"gym", 5.0, 5.4},   {"all", 5.4, 5.6},
+                                         {"day.", 5.6, 6.2}};
+            const auto exact = split_by_speaker({quick}, {-1}, qt, 1.0, w);
+            CHECK(exact.size() == 2);
+            if (exact.size() == 2) {
+                CHECK(exact[0].text == "Where were you? I called twice." && exact[0].speaker == 0);
+                CHECK(exact[1].text == "Sorry. My phone died. I was at the gym all day." && exact[1].speaker == 1);
+                CHECK(std::fabs(exact[0].end - 1.875) < 1e-9 && exact[1].start == exact[0].end && exact[1].group == 0);
+            }
+            // Three quick turns in one subtitle (A, B, A), each found.
+            const std::vector<SpeakerTurn> three = {{0, 0.85, 0}, {0.85, 1.9, 1}, {1.9, 8, 0}};
+            const auto t3 = split_by_speaker({quick}, {-1}, three, 1.0, w);
+            CHECK(t3.size() == 3 && t3[0].text == "Where were you?" && t3[1].text == "I called twice." &&
+                  t3[1].speaker == 1 && t3[2].speaker == 0);
+            // A slip of the detection: one word in the middle of A's sentence heard as B
+            // (0.7 s, one of its windows) stays A's - also at the end of a subtitle,
+            // where the next one goes on. B's "Really?" between A's sentences stays B's.
+            const std::vector<pk::SrtCue> home = {cue(0, 3, "Then I drove all the way home"),
+                                                  cue(3, 6, "and went to bed. Really? Yes, I was tired.")};
+            const std::vector<Word> hw = {{"Then", 0, 0.3},   {"I", 0.3, 0.4},    {"drove", 0.4, 0.8},  {"all", 0.8, 1.0},
+                                          {"the", 1.0, 1.1},  {"way", 1.1, 1.4},  {"home", 1.5, 2.2},   {"and", 3.0, 3.2},
+                                          {"went", 3.2, 3.5}, {"to", 3.5, 3.6},   {"bed.", 3.6, 4.0},   {"Really?", 4.1, 4.7},
+                                          {"Yes,", 4.8, 5.0}, {"I", 5.0, 5.1},    {"was", 5.1, 5.3},    {"tired.", 5.3, 5.9}};
+            const std::vector<SpeakerTurn> ht = {{0, 1.45, 0}, {1.45, 2.3, 1}, {2.3, 4.05, 0}, {4.05, 4.75, 1}, {4.75, 6, 0}};
+            const auto hp = split_by_speaker(home, {-1, -1}, ht, 1.0, hw);
+            CHECK(hp.size() == 4);
+            if (hp.size() == 4) {
+                CHECK(hp[0].text == "Then I drove all the way home" && hp[0].speaker == 0);
+                CHECK(hp[1].text == "and went to bed." && hp[1].speaker == 0);
+                CHECK(hp[2].text == "Really?" && hp[2].speaker == 1 && hp[3].text == "Yes, I was tired." && hp[3].speaker == 0);
+            }
+            // The same slip in the middle of a subtitle, and a longer stretch (1.8 s), which
+            // stays (the two words before it are then too short for a part of their own).
+            const std::vector<SpeakerTurn> mid = {{0, 0.75, 0}, {0.75, 1.45, 1}, {1.45, 6, 0}};
+            const auto mp = split_by_speaker(home, {-1, -1}, mid, 1.0, hw);
+            CHECK(mp.size() == 2 && mp[0].speaker == 0 && mp[1].speaker == 0);
+            const std::vector<SpeakerTurn> longer = {{0, 0.35, 0}, {0.35, 2.3, 1}, {2.3, 6, 0}};
+            const auto lp = split_by_speaker(home, {-1, -1}, longer, 1.0, hw);
+            CHECK(lp.size() == 2 && lp[0].speaker == 1 && lp[1].speaker == 0);
+            // The words file round trip.
+            const auto back = parse_words(format_words(w) + "junk line\n");
+            CHECK(back.size() == w.size() && back[2].text == "you?" && std::fabs(back[16].end - 6.2) < 1e-9);
+        }
 
         // Lines of different speakers are never joined; a voice sample is one speaker's.
         std::vector<SubCue> sc = {{0, 2, "and then", 0}, {2.1, 4, "he left", 1}, {4.2, 9, "we waited for him there", 1},

@@ -17,6 +17,7 @@
 #include "model_catalog.h"
 #include "speakers.h"  // ../common
 #include "srt.h"
+#include "transcript.h"  // Word
 
 namespace tmx {
 
@@ -109,8 +110,21 @@ struct SpeakerPart {
 // Changes shorter than `min_part` seconds are ignored (a "yes" in between
 // isn't worth a subtitle of its own). Subtitles without a speaker get the one
 // before (or after) them.
+//
+// With the word timings of the transcription (`words`), each word gets the
+// speaker who speaks at that moment and a subtitle is split exactly between
+// two words where the speaker changes; only changes shorter than
+// `min_word_part` seconds are ignored there. Without them the split is
+// estimated from the text's length, which is much less exact when people
+// speak in quick turns.
 std::vector<SpeakerPart> split_by_speaker(const std::vector<pk::SrtCue>& cues, const std::vector<int>& labels,
-                                          const std::vector<SpeakerTurn>& turns, double min_part = 1.0);
+                                          const std::vector<SpeakerTurn>& turns, double min_part = 1.0,
+                                          const std::vector<Word>& words = {}, double min_word_part = 0.45);
+
+// The word timings file of "transcribe_multi --words": one word per line,
+// "start<TAB>end<TAB>word" (seconds). Unreadable lines are skipped.
+std::string format_words(const std::vector<Word>& words);
+std::vector<Word> parse_words(const std::string& text);
 // Where to split `text` so that about `frac` (0-1) of it comes first: the byte
 // position where the second part starts (0 = nowhere to split).
 size_t text_split_point(const std::string& text, double frac);

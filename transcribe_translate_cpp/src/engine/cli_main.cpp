@@ -19,6 +19,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -53,6 +54,9 @@ struct Args {
     bool want_txt = false, want_srt = false, want_docx = false;  // from `format`
     std::string text_dir;        // also write the text outputs here (for the GUI's PDFs)
     std::string words;           // also write the word timings here (for "tt_engine speakers --words")
+    // Several speakers, the last step: the outputs from an earlier run's subtitles
+    // (no speech recognition), with the speakers' names from "tt_engine speakers".
+    std::string from_srt, from_words, speakers_file;
     std::string output;
     std::string model_file;      // local GGUF override
     std::string models_dir;      // cache override
@@ -114,6 +118,17 @@ void print_usage() {
         "                            to make PDFs); with -f none only these are written\n"
         "      --words FILE          also write the word timings (start, end, word per line),\n"
         "                            for \"tt_engine speakers --words\"\n"
+        "\n"
+        "several speakers (three runs: transcribe -f srt --words W; speakers --srt .. --words W\n"
+        "-o SPEAKERS --split-srt SPLIT; then this, which writes the outputs with names):\n"
+        "      --from-srt FILE       don't transcribe: take the text from these subtitles\n"
+        "                            (INPUT only names the outputs)\n"
+        "      --from-words FILE     their word timings (for --smart-paragraphs)\n"
+        "      --speakers-file FILE  the speakers of --from-srt (\"tt_engine speakers --split-srt\"):\n"
+        "                            each speaker's turn starts a paragraph with their name\n"
+        "                            (\"Anna: ...\"), and so do the subtitles where the speaker\n"
+        "                            changes\n"
+        "\n"
         "      --model-file PATH     use this local .gguf instead of downloading\n"
         "      --models-dir DIR      where models are cached (default %%USERPROFILE%%\\.cache\\crispasr)\n"
         "  -h, --help                show this help\n"
@@ -173,6 +188,9 @@ Args parse_args(const std::vector<std::string>& av) {
         else if (o == "-o" || o == "--output") a.output = need(i);
         else if (o == "--text-dir") a.text_dir = need(i);
         else if (o == "--words") a.words = need(i);
+        else if (o == "--from-srt") a.from_srt = need(i);
+        else if (o == "--from-words") a.from_words = need(i);
+        else if (o == "--speakers-file") a.speakers_file = need(i);
         else if (o == "--language") a.language = need(i);
         else if (o == "--device") a.device = need(i);
         else if (o == "--threads") a.threads = (int)parse_int(o, need(i), 0, 1024);  // 0 = automatic
@@ -217,6 +235,8 @@ Args parse_args(const std::vector<std::string>& av) {
         if (!a.want_txt && !a.want_srt && !a.want_docx && a.text_dir.empty())
             die("--format none writes nothing (add --text-dir, or choose txt, srt or docx)");
     }
+    if (a.from_srt.empty() && (!a.speakers_file.empty() || !a.from_words.empty()))
+        die("--speakers-file and --from-words go with --from-srt (see --help)");
     if (!find_model(a.model)) die("unknown model '" + a.model + "' (parakeet-ultra, ark, qwen, parakeet-redux)");
     return a;
 }
@@ -247,7 +267,8 @@ int transcribe_main(const std::vector<std::string>& av) {
     const fs::path in_path = path_from_utf8(args.input);
     std::error_code ec;  // not the throwing overload: this is outside the try below
     if (!fs::is_regular_file(in_path, ec)) die("input file not found: " + args.input);
-    const bool have_ffmpeg = ffmpeg_available();
+    const bool resume = !args.from_srt.empty();  // the text is there already: no speech recognition
+    const bool have_ffmpeg = !resume && ffmpeg_available();
     try {
         crispasr();  // load crispasr.dll now so a setup problem is reported before any work
     } catch (const std::exception& e) {
@@ -271,17 +292,27 @@ int transcribe_main(const std::vector<std::string>& av) {
 
     const auto t0 = std::chrono::steady_clock::now();
     say("Input : " + args.input);
-    say("Model : " + model.key + " (" + model.display + ")");
-    if (cohere_assumes_english)
+    if (!resume) say("Model : " + model.key + " (" + model.display + ")");
+    if (cohere_assumes_english && !resume)
         say("Note: Cohere Transcribe can't detect the language; using English. Choose the spoken language "
             "with --language.");
 
     try {
-        if (!device_note.empty()) say("Note: " + device_note);
+        if (!device_note.empty() && !resume) say("Note: " + device_note);
+        char buf[160];
+        double duration = 0;
+        PipelineResult transcribed;
+        std::vector<pk::SrtCue> resumed;  // --from-srt: its subtitles
+        if (resume) {
+            for (auto& c : pk::parse_srt(read_text_file(args.from_srt)))
+                if (c.timed && !normalize_space(pk::strip_srt_tags(c.text)).empty()) resumed.push_back(std::move(c));
+            for (const auto& c : resumed)
+                pk::append_spoken(&transcribed.text, normalize_space(pk::strip_srt_tags(c.text)));
+            if (!args.from_words.empty()) transcribed.words = parse_words(read_text_file(args.from_words));
+        } else {
         say(have_ffmpeg ? "Decoding audio with ffmpeg..." : "Decoding audio (built-in decoder; ffmpeg not found)...");
         std::vector<float> wav = have_ffmpeg ? load_audio(args.input) : load_audio_builtin(args.input);
-        const double duration = (double)wav.size() / kSampleRate;
-        char buf[128];
+        duration = (double)wav.size() / kSampleRate;
         {
             const long long t = (long long)(duration + 0.5);
             std::snprintf(buf, sizeof(buf), "Audio : %lld:%02lld:%02lld (%.2f s)", t / 3600, (t / 60) % 60, t % 60,
@@ -312,7 +343,8 @@ int transcribe_main(const std::vector<std::string>& av) {
         hooks.say = say;
         hooks.progress = progress_line;
         hooks.model_file = [&](const ModelInfo& m) { return ensure_model(m, args.models_dir); };
-        PipelineResult transcribed = transcribe_audio(std::move(wav), po, hooks);
+        transcribed = transcribe_audio(std::move(wav), po, hooks);
+        }
         const std::string& text = transcribed.text;
         const std::vector<Segment>& cues = transcribed.cues;
         const std::vector<Word>& timed_words = transcribed.words;
@@ -320,6 +352,49 @@ int transcribe_main(const std::vector<std::string>& av) {
             say("Warning: no speech was transcribed.");
             return 1;
         }
+
+        // Several speakers: who said what. Names are written with two or more.
+        pk::SpeakerMap speakers;
+        std::vector<pk::SpeakerTurnText> turns;
+        std::vector<std::string> labels;  // "Anna:", for the spelling correction
+        if (!args.speakers_file.empty()) {
+            std::string why;
+            if (!pk::parse_speakers(read_text_file(args.speakers_file), &speakers, &why))
+                throw std::runtime_error("can't read the speakers in " + args.speakers_file + " (" + why + ")");
+            if (speakers.speakers.size() >= 2) turns = pk::speaker_turn_texts(resumed, speakers);
+            std::string names;
+            for (const auto& s : speakers.speakers) {
+                names += (names.empty() ? "" : ", ") + s.name;
+                labels.push_back(s.name + ":");
+            }
+            if (turns.empty()) say("Note: one speaker (" + names + "), so no names are written.");
+            else say("Speakers: " + names + " (" + std::to_string(turns.size()) + " turns)");
+        }
+        const bool named = !turns.empty();
+        // The sentences of the turns, and where each turn starts.
+        auto turn_sentences = [&](int max_words, std::vector<std::pair<int, std::string>>* starts) {
+            std::vector<std::string> all;
+            for (const auto& t : turns) {
+                std::vector<std::string> s = split_sentences(t.text, max_words);
+                if (s.empty()) continue;
+                starts->push_back({(int)all.size(), t.name});
+                all.insert(all.end(), std::make_move_iterator(s.begin()), std::make_move_iterator(s.end()));
+            }
+            return all;
+        };
+        // Paragraphs of a fixed size (within each speaker's turn).
+        auto fixed_paragraphs = [&] {
+            if (!named) return format_paragraphs(text, args.sentences_per_paragraph);
+            std::vector<std::pair<int, std::string>> starts;
+            const std::vector<std::string> sentences = turn_sentences(0, &starts);
+            std::vector<int> breaks;
+            for (size_t t = 0; t < starts.size(); ++t) {
+                const int end = t + 1 < starts.size() ? starts[t + 1].first : (int)sentences.size();
+                for (int i = starts[t].first + args.sentences_per_paragraph; i < end; i += args.sentences_per_paragraph)
+                    breaks.push_back(i);
+            }
+            return join_speaker_paragraphs(sentences, breaks, starts);
+        };
 
         fs::path base = args.output.empty() ? in_path : path_from_utf8(args.output);
         if (base.has_parent_path()) fs::create_directories(base.parent_path());
@@ -351,6 +426,7 @@ int transcribe_main(const std::vector<std::string>& av) {
                 d.title = title;
                 d.note = note;
                 d.body = body;
+                if (!turns.empty()) d.bold_starts = labels;  // names were written: in bold
                 write_file(p, pk::make_docx(d));
                 if (record) written.push_back(p);
             }
@@ -360,16 +436,25 @@ int transcribe_main(const std::vector<std::string>& av) {
                 if (record) text_copies.push_back(p);
             }
         };
-        write_result("", "", format_paragraphs(text, args.sentences_per_paragraph), true);
+        write_result("", "", fixed_paragraphs(), true);
         if (want_srt) {
             fs::path p = base;
             p.replace_extension(".srt");
-            write_file(p, format_srt(cues));
+            if (resume) {
+                // With the speakers: a subtitle split where the speaker changes is one
+                // subtitle again, and the names are added.
+                std::vector<Segment> shown;
+                for (const auto& c : args.speakers_file.empty() ? resumed : pk::name_speaker_parts(resumed, speakers))
+                    shown.push_back({c.start, c.end, c.text, {}});
+                write_file(p, format_srt(shown));
+            } else {
+                write_file(p, format_srt(cues));
+            }
             written.push_back(p);
         }
         if (!args.words.empty()) write_file(path_from_utf8(args.words), format_words(timed_words));
 
-        {
+        if (!resume) {
             const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             std::snprintf(buf, sizeof(buf), "Transcribed in %.1f s (%.1fx real time)", t, duration / std::max(t, 1e-6));
             say(buf);
@@ -395,20 +480,36 @@ int transcribe_main(const std::vector<std::string>& av) {
             lo.threads = args.threads;
             lo.n_ctx = args.llm_ctx;
             LlmSession llm(llm_path, lo);
-            std::string paragraphs = format_paragraphs(text, args.sentences_per_paragraph);
+            std::string paragraphs = fixed_paragraphs();
 
             if (args.smart_paragraphs) {
                 say("Finding paragraph breaks...");
                 // Unpunctuated runs are cut at 80 words; a "sentence" still too long for
                 // the model's context (e.g. text without spaces) keeps the fixed paragraphs.
-                const std::vector<std::string> sentences = split_sentences(text, 80);
+                std::vector<std::pair<int, std::string>> starts;
+                const std::vector<std::string> sentences = named ? turn_sentences(80, &starts) : split_sentences(text, 80);
                 const std::vector<double> pauses = sentence_pauses(sentences, timed_words);
                 ParagraphStats ps;
-                const std::vector<int> breaks = smart_paragraph_breaks(
+                std::vector<int> breaks = smart_paragraph_breaks(
                     llm, sentences, pauses, args.sentences_per_paragraph,
                     [&](int d, int t) { progress_line("paragraphs", d, t, "parts"); }, &ps);
-                paragraphs = join_paragraphs(sentences, breaks);
-                std::snprintf(buf, sizeof(buf), "Paragraphs: %zu (%s)", breaks.size() + 1,
+                size_t count = breaks.size() + 1;
+                if (named) {
+                    // Every turn starts a paragraph already; a break within a turn stays
+                    // unless it would leave one sentence alone at the turn's start or end.
+                    std::vector<bool> turn_at(sentences.size() + 1, false);
+                    for (const auto& s : starts) turn_at[(size_t)s.first] = true;
+                    turn_at[sentences.size()] = true;
+                    std::vector<int> within;
+                    for (int i : breaks)
+                        if (i > 0 && i < (int)sentences.size() && !turn_at[(size_t)i] && !turn_at[(size_t)i - 1] &&
+                            !turn_at[(size_t)i + 1])
+                            within.push_back(i);
+                    breaks = std::move(within);
+                    count = starts.size() + breaks.size();
+                }
+                paragraphs = named ? join_speaker_paragraphs(sentences, breaks, starts) : join_paragraphs(sentences, breaks);
+                std::snprintf(buf, sizeof(buf), "Paragraphs: %zu (%s)", count,
                               pauses.empty() ? "from the text" : "from the text and pauses");
                 say(buf);
                 if (ps.skipped > 0) {
@@ -436,11 +537,13 @@ int transcribe_main(const std::vector<std::string>& av) {
                 say("Correcting spelling and grammar...");
                 PolishStats st;
                 const std::string clean = polish_transcript(
-                    llm, paragraphs, [&](int d, int t) { progress_line("polish", d, t, "chunks"); }, &st);
+                    llm, paragraphs, [&](int d, int t) { progress_line("polish", d, t, "chunks"); }, &st,
+                    named ? &labels : nullptr);
                 if (st.kept_original > 0) {
                     std::snprintf(buf, sizeof(buf),
                                   "Note: %d of %d sections were left unchanged because the model's correction "
-                                  "changed too many words.", st.kept_original, st.chunks);
+                                  "changed too many words%s.", st.kept_original, st.chunks,
+                                  named ? " or a speaker's name" : "");
                     say(buf);
                 }
                 write_result(".clean",
@@ -463,7 +566,7 @@ int transcribe_main(const std::vector<std::string>& av) {
 
         const double elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (use_llm)  // the real-time figure was printed for the transcription
+        if (use_llm || resume)  // the real-time figure was printed for the transcription
             std::snprintf(buf, sizeof(buf), "\nDone in %.1f s", elapsed);
         else
             std::snprintf(buf, sizeof(buf), "\nDone in %.1f s (%.1fx real time)", elapsed,

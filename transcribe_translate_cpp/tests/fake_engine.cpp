@@ -39,9 +39,6 @@ void say(const std::string& s) {
     std::fflush(stdout);
 }
 
-const char* kSrt = "1\n00:00:01,000 --> 00:00:03,000\nGood morning, everyone.\n\n"
-                   "2\n00:00:03,500 --> 00:00:06,000\nToday we talk about the budget.\n";
-
 }  // namespace
 
 int run(const std::vector<std::string>& a);
@@ -108,18 +105,68 @@ int run(const std::vector<std::string>& a) {
     if (a.empty()) return 2;
     if (const char* ms = std::getenv("TT_FAKE_SLEEP_MS"))
         std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(ms)));
+    // Who speaks when: the first subtitle is Speaker 1's, the second Speaker 2's
+    // (one speaker with --num-speakers 1). $TT_FAKE_SPEAKERS_FAIL: it fails.
+    if (a[0] == "speakers" && a.size() > 1) {
+        if (std::getenv("TT_FAKE_SPEAKERS_FAIL")) {
+            std::fprintf(stderr, "Error: fake engine: speaker detection failed\n");
+            return 1;
+        }
+        const bool one = arg(a, "--num-speakers") == "1";
+        say("Finding who speaks when ...");
+        say("progress: speakers 50/100 percent");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        say("progress: speakers 49/100 percent");  // (late, from another thread: ignored)
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        say("progress: speakers 100/100 percent");
+        std::ofstream(arg(a, "-o"), std::ios::binary)
+            << "# speakers 1\nspeaker\t0\tSpeaker 1\t2.000\t1.000\t3.000\n"
+            << (one ? "" : "speaker\t1\tSpeaker 2\t2.500\t3.500\t6.000\n")
+            << "cue\t1.000\t3.000\t0\t0\ncue\t3.500\t6.000\t" << (one ? "0" : "1") << "\t1\n";
+        if (!arg(a, "--split-srt").empty()) std::ofstream(arg(a, "--split-srt"), std::ios::binary) << read(arg(a, "--srt"));
+        say(one ? "Speakers: 1 found" : "Speakers: 2 found");
+        say("  wrote " + arg(a, "-o"));
+        return 0;
+    }
     if (a[0] == "transcribe" && a.size() > 1) {
-        say("Audio : input (6.0 s)");
-        say("Engine: CPU (fake)");
-        say("progress: transcribe 6/6 s");
-        say("Transcribed in 0.1 s");
+        // --from-srt: the outputs from an earlier run's subtitles, each line with its
+        // speaker's name from --speakers-file (the n-th speaker said the n-th line).
+        const std::string from = arg(a, "--from-srt");
+        std::vector<std::string> names;
+        {
+            std::istringstream in(read(arg(a, "--speakers-file")));
+            for (std::string line; std::getline(in, line);)
+                if (line.rfind("speaker\t", 0) == 0) {
+                    const size_t b = line.find('\t', 8);
+                    names.push_back(line.substr(b + 1, line.find('\t', b + 1) - b - 1));
+                }
+        }
+        const auto named = [&](size_t k, const char* text) {
+            return (names.size() >= 2 ? names[std::min(k, names.size() - 1)] + ": " : std::string()) + text;
+        };
+        if (from.empty()) {
+            say("Audio : input (6.0 s)");
+            say("Engine: CPU (fake)");
+            say("progress: transcribe 6/6 s");
+            say("Transcribed in 0.1 s");
+        } else if (read(from).empty()) {
+            std::fprintf(stderr, "Error: fake engine: no subtitles in %s\n", from.c_str());
+            return 1;
+        }
+        if (!arg(a, "--words").empty()) std::ofstream(arg(a, "--words"), std::ios::binary) << "1.000\t1.400\tGood\n";
         const std::string base = stem(arg(a, "-o", a[1]));
         std::string formats = arg(a, "-f", "txt") + ",";
         for (size_t p; (p = formats.find(',')) != std::string::npos; formats.erase(0, p + 1)) {
             const std::string f = formats.substr(0, p);
             if (f != "txt" && f != "srt") continue;
+            const std::string plain = names.size() >= 2 ? named(0, "Good morning, everyone.") + "\n\n" +
+                                                              named(1, "Today we talk about the budget.") + "\n"
+                                                        : std::string("Good morning, everyone. Today we talk about the budget.\n");
             std::ofstream(base + "." + f, std::ios::binary)
-                << (f == "srt" ? std::string(kSrt) : std::string("Good morning, everyone. Today we talk about the budget.\n"));
+                << (f == "srt" ? "1\n00:00:01,000 --> 00:00:03,000\n" + named(0, "Good morning, everyone.") +
+                                     "\n\n2\n00:00:03,500 --> 00:00:06,000\n" +
+                                     named(1, "Today we talk about the budget.") + "\n"
+                               : plain);
             say("  wrote " + base + "." + f);
         }
         return 0;

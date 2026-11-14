@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -255,6 +256,106 @@ std::vector<SrtCue> join_speaker_parts(const std::vector<SrtCue>& cues, const st
     for (auto& c : out)
         if (!c.index.empty()) c.index = std::to_string(++k);
     return out;
+}
+
+namespace {
+
+// The code point that ends / starts `s` (0: none).
+uint32_t last_code_point(const std::string& s) {
+    size_t i = s.size();
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) --i;
+    if (i == 0) return 0;
+    --i;
+    uint32_t c = (unsigned char)s[i];
+    if (c < 0x80) return c;
+    c &= c >= 0xF0 ? 0x07 : c >= 0xE0 ? 0x0F : 0x1F;
+    for (size_t j = i + 1; j < s.size(); ++j) c = (c << 6) | ((unsigned char)s[j] & 0x3F);
+    return c;
+}
+uint32_t first_code_point(const std::string& s) {
+    if (s.empty()) return 0;
+    uint32_t c = (unsigned char)s[0];
+    if (c < 0x80) return c;
+    const size_t n = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2;
+    c &= c >= 0xF0 ? 0x07 : c >= 0xE0 ? 0x0F : 0x1F;
+    for (size_t j = 1; j < n && j < s.size(); ++j) c = (c << 6) | ((unsigned char)s[j] & 0x3F);
+    return c;
+}
+// Chinese and Japanese (and their punctuation), written without spaces. Not Korean.
+bool unspaced(uint32_t c) {
+    return (c >= 0x2E80 && c <= 0x30FF) || (c >= 0x3400 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF) ||
+           (c >= 0xFF00 && c <= 0xFF60) || (c >= 0x20000 && c <= 0x2FFFF);
+}
+
+std::string name_of(const SpeakerMap& map, int id) {
+    const SpeakerInfo* s = map.find(id);
+    return s && !s->name.empty() ? s->name : "Speaker " + std::to_string(id + 1);
+}
+
+}  // namespace
+
+void append_spoken(std::string* text, const std::string& more) {
+    if (more.empty()) return;
+    if (!text->empty() && !(unspaced(last_code_point(*text)) && unspaced(first_code_point(more)))) *text += ' ';
+    *text += more;
+}
+
+std::vector<SrtCue> name_speaker_parts(const std::vector<SrtCue>& cues, const SpeakerMap& map) {
+    const std::vector<CueSpeaker> who = cue_speakers(cues, map);
+    const bool names = map.speakers.size() >= 2;
+    std::vector<SrtCue> out;
+    int last = -1;  // who spoke last
+    size_t i = 0;
+    while (i < cues.size()) {
+        // The parts of one subtitle (a cue the map doesn't have is one on its own).
+        size_t e = i + 1;
+        if (who[i].group >= 0)
+            while (e < cues.size() && who[e].group == who[i].group) ++e;
+        SrtCue c = cues[i];
+        c.end = cues[e - 1].end;
+        if (e - i > 1) c.timing = srt_timing(c.start, c.end);
+        // One line per speaker.
+        std::vector<std::pair<int, std::string>> lines;
+        for (size_t k = i; k < e; ++k) {
+            const std::string t = flat(cues[k].text);
+            if (t.empty()) continue;
+            const int s = who[k].speaker >= 0 ? who[k].speaker : lines.empty() ? last : lines.back().first;
+            if (!lines.empty() && lines.back().first == s) append_spoken(&lines.back().second, t);
+            else lines.push_back({s, t});
+        }
+        std::string text;
+        for (const auto& [s, t] : lines) {
+            if (!text.empty()) text += '\n';
+            if (names && s >= 0 && s != last) text += name_of(map, s) + ": ";
+            text += t;
+            if (s >= 0) last = s;
+        }
+        c.text = text;
+        if (!text.empty()) out.push_back(std::move(c));
+        i = e;
+    }
+    int k = 0;
+    for (auto& c : out)
+        if (!c.index.empty()) c.index = std::to_string(++k);
+    return out;
+}
+
+std::vector<SpeakerTurnText> speaker_turn_texts(const std::vector<SrtCue>& cues, const SpeakerMap& map) {
+    const std::vector<CueSpeaker> who = cue_speakers(cues, map);
+    std::vector<SpeakerTurnText> turns;
+    for (size_t i = 0; i < cues.size(); ++i) {
+        const std::string t = flat(strip_srt_tags(cues[i].text));
+        if (t.empty()) continue;
+        const int s = who[i].speaker;
+        if (turns.empty() || (s >= 0 && turns.back().speaker >= 0 && s != turns.back().speaker)) {
+            turns.push_back({s, std::string(), t});
+        } else {
+            if (turns.back().speaker < 0) turns.back().speaker = s;  // the first subtitles had no speaker
+            append_spoken(&turns.back().text, t);
+        }
+    }
+    for (auto& t : turns) t.name = t.speaker >= 0 ? name_of(map, t.speaker) : std::string();
+    return turns;
 }
 
 }  // namespace pk

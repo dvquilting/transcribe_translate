@@ -184,6 +184,52 @@ std::string format_srt(const std::vector<Segment>& cues) {
     return pk::format_srt(out);
 }
 
+std::string space_before_numbers(const std::string& text) {
+    static const char* const kept[] = {"ipv", "utf", "sha", "base", "web", "crc", "rfc", "vp", "md"};
+    std::string out;
+    out.reserve(text.size() + 8);
+    size_t letters = 0;      // letters in the run that ends here
+    size_t run_start = 0;    // where that run starts in `out`
+    bool small_last = false; // ... and it ends in a small letter
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = (unsigned char)text[i];
+        // Letters: ASCII, and the two-byte ones (Latin with accents, Greek, Cyrillic).
+        const bool ascii_letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        const bool wide_letter = c >= 0xC3 && c <= 0xD3 && i + 1 < text.size() && ((unsigned char)text[i + 1] & 0xC0) == 0x80;
+        if (ascii_letter || wide_letter) {
+            if (letters == 0) run_start = out.size();
+            ++letters;
+            small_last = wide_letter || (c >= 'a' && c <= 'z');
+            out.append(text, i, wide_letter ? 2 : 1);
+            i += wide_letter ? 2 : 1;
+            continue;
+        }
+        if (c >= '0' && c <= '9' && letters >= 3 && small_last) {
+            // The digits must end the word: "2024", "2024.", "12)" - not "64bit".
+            size_t e = i;
+            while (e < text.size() && ((text[e] >= '0' && text[e] <= '9') ||
+                                       ((text[e] == '.' || text[e] == ',' || text[e] == ':') && e + 1 < text.size() &&
+                                        text[e + 1] >= '0' && text[e + 1] <= '9')))
+                ++e;
+            const unsigned char after = e < text.size() ? (unsigned char)text[e] : ' ';
+            const bool ends_word = !((after >= 'a' && after <= 'z') || (after >= 'A' && after <= 'Z') || after >= 0x80);
+            std::string word = out.substr(run_start);
+            for (char& ch : word)
+                if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+            bool keep = false;
+            for (const char* k : kept) keep = keep || word == k;
+            // Only a whole word: not the letters after other characters ("x-ray2").
+            const bool whole = run_start == 0 || out[run_start - 1] == ' ' || out[run_start - 1] == '\n' ||
+                               out[run_start - 1] == '(' || out[run_start - 1] == '"' || out[run_start - 1] == '\'';
+            if (ends_word && !keep && whole) out += ' ';
+        }
+        letters = 0;
+        out += (char)c;
+        ++i;
+    }
+    return out;
+}
+
 std::vector<std::string> split_sentences(const std::string& text, int max_words) {
     std::vector<std::string> sentences;
     std::string cur;
@@ -255,6 +301,39 @@ std::string join_paragraphs(const std::vector<std::string>& sentences, const std
         out += sentences[i];
     }
     return out + "\n";
+}
+
+std::string join_speaker_paragraphs(const std::vector<std::string>& sentences, const std::vector<int>& breaks,
+                                    const std::vector<std::pair<int, std::string>>& turns) {
+    std::string out;
+    size_t b = 0, t = 0;
+    for (size_t i = 0; i < sentences.size(); ++i) {
+        while (b < breaks.size() && breaks[b] < (int)i) ++b;
+        while (t < turns.size() && turns[t].first < (int)i) ++t;
+        const bool turn = t < turns.size() && turns[t].first == (int)i;
+        if (i > 0 && (turn || (b < breaks.size() && breaks[b] == (int)i)))
+            out += "\n\n";
+        else if (i > 0 && !(ends_wide(sentences[i - 1]) && !sentences[i].empty() && (unsigned char)sentences[i][0] >= 0x80))
+            out += ' ';
+        if (turn && !turns[t].second.empty()) out += turns[t].second + ": ";
+        out += sentences[i];
+    }
+    return out + "\n";
+}
+
+bool keeps_speaker_labels(const std::string& original, const std::string& corrected,
+                          const std::vector<std::string>& labels) {
+    const std::vector<std::string> a = split_paragraphs(original), b = split_paragraphs(corrected);
+    if (a.size() != b.size()) return false;
+    auto label_of = [&](const std::string& p) -> const std::string* {
+        const std::string* best = nullptr;  // the longest ("Anna B:" before "Anna:")
+        for (const auto& l : labels)
+            if (!l.empty() && p.compare(0, l.size(), l) == 0 && (!best || l.size() > best->size())) best = &l;
+        return best;
+    };
+    for (size_t i = 0; i < a.size(); ++i)
+        if (label_of(a[i]) != label_of(b[i])) return false;
+    return true;
 }
 
 std::vector<int> parse_number_list(const std::string& reply) {

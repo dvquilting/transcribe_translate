@@ -44,6 +44,17 @@ small language model (Qwen3-4B) that runs on your own computer; nothing is
 uploaded. AI output can contain mistakes: the original transcript (NAME.txt)
 is always saved unchanged, so check anything important against it.
 
+Several speakers
+----------------
+Tick "Several speakers: write who is speaking" to have the speakers' names
+in the transcript. After the speech is written down, a window shows the
+speakers that were found: listen to each one, type their names, mark two
+that are really the same person, or detect again with the number you know.
+Each speaker's turn then starts a new paragraph with their name ("Anna:",
+in bold in the Word and PDF files), and the subtitles show the name where
+the speaker changes. A small voice model (24 MB) is downloaded once. It
+works best with clear recordings and different voices; check the result.
+
 Audio and video formats
 -----------------------
 WAV, MP3, FLAC and OGG/Opus always work. Video files and M4A/AAC need FFmpeg:

@@ -124,7 +124,7 @@ including about 1 GB of CrispASR/CUDA DLLs, ends up in `build\bin\`.
 ## Windows installer
 
 `make_installer.bat` packages `dist\` into a normal Windows installer,
-`installer\output\Transcribe-1.0.0-setup.exe`, using the free
+`installer\output\Transcribe-1.1.0-setup.exe`, using the free
 [Inno Setup](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`).
 It runs `build_static.bat` first if `dist\` hasn't been built.
 
@@ -265,6 +265,25 @@ the original timing (what Speech Translate's step 3 runs):
 | `qwen3-tts` (default) | 2.0 GB | en zh ja ko de fr ru pt es it |
 | `cosyvoice3` | 1.2 GB | en zh ja ko de es fr it ru; drops the original accent when cloning across languages |
 | `omnivoice` | 1.6 GB | 600+ |
+
+### A transcript with the speakers' names
+
+In the window, tick **Several speakers: write who is speaking** (and choose how many, if you know:
+that is more reliable, and much faster for a long recording). After the speech is written down the
+**Speakers** window shows who was found: listen to each, type their names, mark two that are one
+person, or detect again. Each speaker's turn then starts a paragraph with their name (`Anna: ...`,
+in bold in the Word and PDF files), and the subtitles have the name where the speaker changes. The
+corrected copy keeps the names. From the command line it is three runs:
+
+```bat
+transcribe_multi.exe talk.mp4 -f srt -o work\source --words work\words.tsv
+transcribe_multi.exe speakers talk.mp4 --srt work\source.srt --words work\words.tsv -o work\speakers.txt --split-srt work\split.srt
+transcribe_multi.exe talk.mp4 --from-srt work\split.srt --from-words work\words.tsv --speakers-file work\speakers.txt -f txt,srt,docx
+```
+
+`--words` writes the word timings, with which `speakers` splits a subtitle exactly between the
+words where the speaker changes (a word or two heard as someone else in the middle of a sentence
+stay with the speaker). Names can be changed in `speakers.txt` before the last run.
 
 ### Several speakers (`speakers`, `dub --speakers`)
 

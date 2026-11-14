@@ -208,7 +208,7 @@ static std::vector<Segment> collect(crispasr_session_result* r, double offset) {
     for (int i = 0; i < ns; ++i) {
         Segment seg;
         const char* t = crispasr().crispasr_session_result_segment_text(r, i);
-        seg.text = normalize_space(t ? t : "");
+        seg.text = space_before_numbers(normalize_space(t ? t : ""));
         seg.start = offset + crispasr().crispasr_session_result_segment_t0(r, i) / 100.0;
         seg.end = offset + crispasr().crispasr_session_result_segment_t1(r, i) / 100.0;
         const int nw = crispasr().crispasr_session_result_n_words(r, i);
@@ -219,6 +219,16 @@ static std::vector<Segment> collect(crispasr_session_result* r, double offset) {
             if (w.text.empty()) continue;
             w.start = offset + crispasr().crispasr_session_result_word_t0(r, i, j) / 100.0;
             w.end = offset + crispasr().crispasr_session_result_word_t1(r, i, j) / 100.0;
+            // "November2024" is two words, as in the segment's text: each gets
+            // its share of the time, by its length.
+            const std::string spaced = space_before_numbers(w.text);
+            const size_t cut = spaced.size() != w.text.size() ? spaced.find(' ') : std::string::npos;
+            if (cut != std::string::npos && cut > 0 && spaced.find(' ', cut + 1) == std::string::npos) {
+                const double mid = w.start + (w.end - w.start) * (double)cut / (double)(spaced.size() - 1);
+                seg.words.push_back({spaced.substr(0, cut), w.start, mid});
+                seg.words.push_back({spaced.substr(cut + 1), mid, w.end});
+                continue;
+            }
             seg.words.push_back(std::move(w));
         }
         if (!seg.text.empty() || !seg.words.empty()) out.push_back(std::move(seg));

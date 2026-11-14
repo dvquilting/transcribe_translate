@@ -15,6 +15,8 @@ struct DocxText {
     std::string note;   // a line in italics under the title (empty: none)
     std::string body;   // UTF-8 text: paragraphs separated by blank lines
     std::string language;  // document language for spell checking ("en", "de", ...); empty: none
+    // Speakers' names ("Anna:"): a paragraph that starts with one has it in bold.
+    std::vector<std::string> bold_starts;
 };
 
 // The .docx file's bytes.

@@ -1,4 +1,8 @@
-// mainwindow.h - Qt6 front end for transcribe_multi.
+// mainwindow.h - Qt6 front end for transcribe_multi. With several speakers a
+// transcription is three runs: the speech (subtitles and word timings into a
+// work folder), "transcribe_multi speakers" (who speaks when; the user checks
+// them in the Speakers window), then "transcribe_multi --from-srt", which
+// writes the outputs with the speakers' names.
 #pragma once
 
 #include <QElapsedTimer>
@@ -49,6 +53,15 @@ private slots:
     void showModels();  // "Model files": the downloaded models, with Delete / Clean All models
 
 private:
+    // One run, or with several speakers: Transcribe, Speakers (again if asked), Finish.
+    enum class Step { Idle, Single, Transcribe, Speakers, Finish };
+    bool running() const { return step_ != Step::Idle; }  // also while the Speakers window is open
+    void runStep(Step step);
+    QStringList speechArguments(const QString& input) const;  // what the speech recognition takes
+    QStringList speakersArguments() const;
+    enum class Review { Continue, Again, Cancelled, Failed };
+    Review reviewSpeakers();
+    QString workFile(const char* name) const;
     void buildUi();
     void loadSettings();
     void saveSettings();
@@ -80,6 +93,8 @@ private:
     QCheckBox* srtCheck_ = nullptr;
     QCheckBox* docxCheck_ = nullptr;
     QCheckBox* pdfCheck_ = nullptr;
+    QCheckBox* speakersCheck_ = nullptr;   // several speakers: their names in the transcript
+    QComboBox* speakersCount_ = nullptr;
     QComboBox* languageCombo_ = nullptr;
     QGroupBox* advancedBox_ = nullptr;
     QWidget* advancedBody_ = nullptr;
@@ -121,6 +136,15 @@ private:
     QPlainTextEdit* summaryView_ = nullptr;
 
     // state
+    Step step_ = Step::Idle;
+    bool speakers_ = false;        // this run: several speakers
+    int numSpeakers_ = 0;          // ... how many (0: detect)
+    bool speakersFailed_ = false;  // ... but they could not be found: written without names
+    QStringList speakerLabels_;    // "Anna:", ...: bold in the PDFs (empty: no names were written)
+    std::unique_ptr<QTemporaryDir> workDir_;  // the subtitles, word timings and speakers between the runs
+    QString runInput_;             // the input of the current run
+    qint64 pausedMs_ = 0;          // time in the Speakers window (not the run's)
+    qint64 pauseStartMs_ = -1;     // >= 0 while it is open
     QSettings settings_;
     // transcribe_multi; its arguments are built once, when the run starts.
     pk::ChildProcess runner_;

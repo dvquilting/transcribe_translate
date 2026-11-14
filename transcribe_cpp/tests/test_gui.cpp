@@ -149,6 +149,106 @@ int main(int argc, char** argv) {
         CHECK(window.settings_.value(QStringLiteral("formats")).toStringList() == (QStringList{"txt", "srt", "docx"}));
     }
 
+    // Several speakers: three runs (the speech into a work folder, the speakers, the
+    // outputs with their names), the Speakers window, and the names in bold in the PDF.
+    {
+        window.outputEdit_->clear();
+        window.speakersCheck_->setChecked(true);
+        CHECK(window.speakersCount_->isEnabled());
+        window.speakers_ = true;
+        window.runInput_ = QStringLiteral("talk.wav");
+        window.workDir_ = std::make_unique<QTemporaryDir>();
+        window.step_ = MainWindow::Step::Transcribe;
+        QStringList a = window.buildArguments(window.runInput_);
+        CHECK(a.value(a.indexOf(QStringLiteral("-f")) + 1) == QStringLiteral("srt") && a.contains(QStringLiteral("--words")) &&
+              a.value(a.indexOf(QStringLiteral("-o")) + 1) == window.workFile("source.srt") &&
+              !a.contains(QStringLiteral("--from-srt")));
+        writeFile(window.workFile("words.tsv"), "1.000\t1.400\tGood\n");
+        a = window.speakersArguments();
+        CHECK(a.value(0) == QStringLiteral("speakers") && a.value(1) == QStringLiteral("talk.wav") &&
+              a.value(a.indexOf(QStringLiteral("--split-srt")) + 1) == window.workFile("split.srt") &&
+              a.value(a.indexOf(QStringLiteral("--words")) + 1) == window.workFile("words.tsv"));
+        window.step_ = MainWindow::Step::Finish;
+        a = window.buildArguments(window.runInput_);
+        CHECK(a.value(a.indexOf(QStringLiteral("--from-srt")) + 1) == window.workFile("split.srt") &&
+              a.value(a.indexOf(QStringLiteral("--speakers-file")) + 1) == window.workFile("speakers.txt") &&
+              a.contains(QStringLiteral("--from-words")) && !a.contains(QStringLiteral("--words")));
+        window.speakersFailed_ = true;  // the speakers could not be found: the plain subtitles, no names
+        a = window.buildArguments(window.runInput_);
+        CHECK(a.value(a.indexOf(QStringLiteral("--from-srt")) + 1) == window.workFile("source.srt") &&
+              !a.contains(QStringLiteral("--speakers-file")));
+        window.speakersFailed_ = false;
+        // Work files of the first steps are not results.
+        window.step_ = MainWindow::Step::Transcribe;
+        window.written_.clear();
+        window.parseLine(QStringLiteral("  wrote ") + window.workFile("source.srt"));
+        CHECK(window.written_.isEmpty());
+        // Finding the speakers shows how far it is; a late line from another thread is ignored.
+        window.step_ = MainWindow::Step::Speakers;
+        window.parseLine(QStringLiteral("progress: speakers 50/100 percent"));
+        window.parseLine(QStringLiteral("progress: speakers 49/100 percent"));
+        CHECK(window.statusLabel_->text() == QStringLiteral("Finding who speaks when: 50%") && window.progress_->value() == 50);
+        window.parseLine(QStringLiteral("progress: speakers 100/100 percent"));
+        CHECK(window.statusLabel_->text().contains(QStringLiteral("grouping")) && window.progress_->maximum() == 0);
+
+        // The Speakers window: a name is typed, and saved for the last run.
+        writeFile(window.workFile("speakers.txt"),
+                  "# speakers 1\nspeaker\t0\tSpeaker 1\t2.000\t1.000\t3.000\nspeaker\t1\tSpeaker 2\t2.500\t3.500\t6.000\n"
+                  "cue\t1.000\t3.000\t0\t0\ncue\t3.500\t6.000\t1\t1\n");
+        window.runClock_.start();
+        int windows = 0;
+        std::function<void(QDialog*)> inWindow = [](QDialog* d) {
+            if (auto* name = d->findChild<QLineEdit*>(QStringLiteral("name0"))) name->setText(QStringLiteral("Anna"));
+            for (QPushButton* b : d->findChildren<QPushButton*>())
+                if (b->text() == QStringLiteral("Continue")) b->click();
+        };
+        QTimer watch;
+        watch.setInterval(30);
+        QObject::connect(&watch, &QTimer::timeout, [&] {
+            auto* d = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!d || d->windowTitle() != QStringLiteral("Speakers") || d->property("seen").toBool()) return;
+            d->setProperty("seen", true);
+            ++windows;
+            inWindow(d);
+        });
+        watch.start();
+        CHECK(window.reviewSpeakers() == MainWindow::Review::Continue && windows == 1);
+        CHECK(window.speakerLabels_ == (QStringList{"Anna:", "Speaker 2:"}));
+        CHECK(readFile(window.workFile("speakers.txt")).contains("speaker\t0\tAnna\t"));
+        // "Detect again" with a number, and Cancel.
+        inWindow = [](QDialog* d) {
+            for (QComboBox* c : d->findChildren<QComboBox*>())
+                if (c->findData(8) >= 0) c->setCurrentIndex(c->findData(3));
+            for (QPushButton* b : d->findChildren<QPushButton*>())
+                if (b->text() == QStringLiteral("Detect again")) b->click();
+        };
+        CHECK(window.reviewSpeakers() == MainWindow::Review::Again && window.numSpeakers_ == 3);
+        a = window.speakersArguments();
+        CHECK(a.value(a.indexOf(QStringLiteral("--num-speakers")) + 1) == QStringLiteral("3"));
+        inWindow = [](QDialog* d) { d->reject(); };
+        CHECK(window.reviewSpeakers() == MainWindow::Review::Cancelled && windows == 3);
+        writeFile(window.workFile("speakers.txt"), "not a speakers file\n");
+        CHECK(window.reviewSpeakers() == MainWindow::Review::Failed && windows == 3);
+        watch.stop();
+
+        // The PDF: the names at the start of the turns in bold.
+        QTemporaryDir copies;
+        writeFile(copies.filePath(QStringLiteral("meeting.txt")), "Anna: Good morning.\n\nSpeaker 2: Hello. Anna: was early.\n");
+        QString error;
+        const QString pdf = QDir(fixture.path()).filePath(QStringLiteral("meeting.pdf"));
+        CHECK(writePdf(copies.filePath(QStringLiteral("meeting.txt")), pdf, QStringLiteral("meeting"), &error,
+                       window.speakerLabels_));
+        CHECK(readFile(pdf).startsWith("%PDF"));
+        if (const QByteArray keep = qgetenv("TT_KEEP_PDF"); !keep.isEmpty()) QFile::copy(pdf, QString::fromLocal8Bit(keep));
+
+        window.step_ = MainWindow::Step::Idle;
+        window.workDir_.reset();
+        window.speakers_ = false;
+        window.speakersCheck_->setChecked(false);
+        window.saveSettings();
+        CHECK(!window.settings_.value(QStringLiteral("speakers")).toBool());
+    }
+
     // Help: the page describes every model, and the button opens it, also while running.
     {
         const QString help = helpHtml();

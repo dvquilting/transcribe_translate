@@ -2,6 +2,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "srt.h"        // ../common: srt_time
@@ -41,6 +42,14 @@ std::string format_srt(const std::vector<Segment>& cues);
 // Collapse whitespace and group sentences into paragraphs separated by blank lines.
 std::string format_paragraphs(const std::string& text, int sentences_per_paragraph);
 
+// ---- Numbers -------------------------------------------------------------
+// Some recognizers write a number straight onto the word before it
+// ("November2024", "page12."). A space goes between a word of three or more
+// letters that ends in a small letter and the digits after it. Left alone:
+// short and capital names (A4, mp3, Q3, COVID19), a few written that way
+// (ipv6, utf8, sha256, base64, web3), and digits followed by letters (2024a).
+std::string space_before_numbers(const std::string& text);
+
 // ---- Paragraphs ----------------------------------------------------------
 // Split into sentences (a word ending in . ? ! or an ellipsis; also after the
 // full-width CJK marks, which need no space after them). A run longer than
@@ -57,6 +66,17 @@ std::vector<double> sentence_pauses(const std::vector<std::string>& sentences, c
 // that start a new paragraph (sorted, 0 is implied). Sentences are separated by
 // a space, except CJK sentences after a full-width sentence end.
 std::string join_paragraphs(const std::vector<std::string>& sentences, const std::vector<int>& breaks);
+
+// Several speakers: `turns` holds, for each turn, the index of its first
+// sentence and the speaker's name. Each turn starts a paragraph that begins
+// with "Name: "; `breaks` start further (unnamed) paragraphs within the turns.
+std::string join_speaker_paragraphs(const std::vector<std::string>& sentences, const std::vector<int>& breaks,
+                                    const std::vector<std::pair<int, std::string>>& turns);
+
+// True when a corrected text kept the paragraphs of `original` and the speaker
+// name each one starts with (`labels`: "Anna:", ...).
+bool keeps_speaker_labels(const std::string& original, const std::string& corrected,
+                          const std::vector<std::string>& labels);
 
 // All integers in a model reply such as "4, 11 and 19." (in order).
 std::vector<int> parse_number_list(const std::string& reply);

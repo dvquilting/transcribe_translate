@@ -90,3 +90,169 @@ CA_EXPORT void crispasr_align_free_cache_abi(void) {
 }
 
 CA_EXPORT crispasr_align_result* crispasr_align_words_abi(]=])
+
+# Speaker detection: report how far the voice embedding (the long part) is, as
+# the engine's "progress:" lines, when TT_DIARIZE_PROGRESS is set ("tt_engine
+# speakers" sets it). One line per percent at most; several threads embed, so
+# two neighbouring lines can arrive swapped (the window ignores a step back).
+tmx_patch_source(TMX_PATCH_DIARIZE_PROGRESS_INC src/core/foxnose_pipeline.cpp "speaker detection progress (includes)"
+[=[#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <map>]=]
+[=[#include <algorithm>
+#include <atomic> // tt_engine: progress
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <map>]=])
+tmx_patch_source(TMX_PATCH_DIARIZE_PROGRESS src/core/foxnose_pipeline.cpp "speaker detection progress"
+[=[    core_parallel::for_each_task(n_spans, n_workers, [&](int si, int slot) { do_span(si, slot); });]=]
+[=[    const bool tt_progress = std::getenv("TT_DIARIZE_PROGRESS") != nullptr; // tt_engine: progress lines
+    std::atomic<int> tt_done{0}, tt_shown{0};
+    core_parallel::for_each_task(n_spans, n_workers, [&](int si, int slot) {
+        do_span(si, slot);
+        if (!tt_progress)
+            return;
+        const int pct = (int)((long long)++tt_done * 100 / n_spans);
+        int shown = tt_shown.load();
+        while (pct > shown && !tt_shown.compare_exchange_weak(shown, pct)) {
+        }
+        if (pct > shown) {
+            std::fprintf(stdout, "progress: speakers %d/100 percent\n", pct);
+            std::fflush(stdout);
+        }
+    });]=])
+
+# Speaker detection, grouping the voices: the eigenvectors of the windows'
+# similarity matrix are the slow part of a long recording (it grows with the
+# square of its length). The same sums in the same order - the results are
+# bit-identical (checked against the original on generated voices) - but four
+# rows at a time, and with the threads the parallel sweep over the number of
+# speakers leaves free. A fixed number of speakers gets all threads.
+tmx_patch_source(TMX_PATCH_EIGEN_0 src/core/spectral_diarize.cpp "faster voice grouping (rows)"
+[=[        for (int i = 0; i < n; i++) {
+            for (int c = 0; c < k; c++) {
+                double acc = shift * q[(size_t)i * k + c];
+                for (int j = 0; j < n; j++)
+                    acc += m[(size_t)i * n + j] * q[(size_t)j * k + c];
+                z[(size_t)i * k + c] = acc;
+            }
+        }
+        q.swap(z);]=]
+[=[        // tt_engine: the same sums in the same order as the plain loop (the
+        // results are bit-identical), but four rows at a time, so the processor
+        // works on 4*k sums at once instead of one, and the rows shared between
+        // the threads this solve may use (tt_eigen_threads).
+        auto tt_rows = [&](int r0, int r1) {
+            enum { kRows = 4, kCols = 32 };
+            const double* mp = m.data();
+            const double* qp = q.data();
+            double* zp = z.data();
+            int i = r0;
+            if (k <= kCols)
+                for (; i + kRows <= r1; i += kRows) {
+                    double acc[kRows][kCols];
+                    for (int r = 0; r < kRows; r++)
+                        for (int c = 0; c < k; c++)
+                            acc[r][c] = shift * qp[(size_t)(i + r) * k + c];
+                    const double* m0 = mp + (size_t)i * n;
+                    const double* m1 = m0 + n;
+                    const double* m2 = m1 + n;
+                    const double* m3 = m2 + n;
+                    for (int j = 0; j < n; j++) {
+                        const double* qj = qp + (size_t)j * k;
+                        const double a0 = m0[j], a1 = m1[j], a2 = m2[j], a3 = m3[j];
+                        for (int c = 0; c < k; c++) {
+                            const double x = qj[c];
+                            acc[0][c] += a0 * x;
+                            acc[1][c] += a1 * x;
+                            acc[2][c] += a2 * x;
+                            acc[3][c] += a3 * x;
+                        }
+                    }
+                    for (int r = 0; r < kRows; r++)
+                        for (int c = 0; c < k; c++)
+                            zp[(size_t)(i + r) * k + c] = acc[r][c];
+                }
+            for (; i < r1; i++) {
+                for (int c = 0; c < k; c++) {
+                    double acc = shift * qp[(size_t)i * k + c];
+                    for (int j = 0; j < n; j++)
+                        acc += mp[(size_t)i * n + j] * qp[(size_t)j * k + c];
+                    zp[(size_t)i * k + c] = acc;
+                }
+            }
+        };
+        const int tt_threads = (double)n * n * k >= 4e6 ? std::max(1, tt_eigen_threads.load()) : 1;
+        core_parallel::for_each_chunk(n, tt_threads, tt_rows);
+        q.swap(z);]=])
+tmx_patch_source(TMX_PATCH_EIGEN_1 src/core/spectral_diarize.cpp "faster voice grouping (threads)"
+[=[std::vector<double> top_eigenvectors(const std::vector<double>& m, int n, int k, unsigned seed) {]=]
+[=[// tt_engine: how many threads one top_eigenvectors() call may use for its rows
+// (set by cluster_speakers(): what its own parallel sweep leaves free).
+std::atomic<int> tt_eigen_threads{1};
+
+std::vector<double> top_eigenvectors(const std::vector<double>& m, int n, int k, unsigned seed) {]=])
+tmx_patch_source(TMX_PATCH_EIGEN_2 src/core/spectral_diarize.cpp "faster voice grouping (single run)"
+[=[    auto run = [&](int k) {
+        std::vector<int> lab = spectral_labels(aff.data(), n, k, seed);
+        return refine_spherical(x, n, d, lab);
+    };
+]=]
+[=[    auto run = [&](int k) {
+        std::vector<int> lab = spectral_labels(aff.data(), n, k, seed);
+        return refine_spherical(x, n, d, lab);
+    };
+    // tt_engine: a single spectral run gets all the threads.
+    const int tt_all_threads = core_parallel::resolve_threads(n, n_threads);
+    tt_eigen_threads = tt_all_threads;
+]=])
+tmx_patch_source(TMX_PATCH_EIGEN_3 src/core/spectral_diarize.cpp "faster voice grouping (sweep)"
+[=[    const int n_cand = upper - lower + 1;
+    std::vector<std::vector<int>> cand_labels((size_t)n_cand);]=]
+[=[    const int n_cand = upper - lower + 1;
+    tt_eigen_threads = std::max(1, tt_all_threads / n_cand); // tt_engine: the sweep runs n_cand at once
+    std::vector<std::vector<int>> cand_labels((size_t)n_cand);]=])
+
+# Speaker detection: how long listening and grouping took (one line, when
+# TT_DIARIZE_PROGRESS is set), and the grouping with TT_DIARIZE_THREADS threads
+# when that is more than the embedders (there is one on a graphics card).
+tmx_patch_source(TMX_PATCH_DIARIZE_TIMING_0 src/core/foxnose_pipeline.cpp "speaker detection timing (include)"
+[=[#include <map>
+#include <set>]=]
+[=[#include <map>
+#include <set>
+#include <chrono> // tt_engine: timing]=])
+tmx_patch_source(TMX_PATCH_DIARIZE_TIMING_1 src/core/foxnose_pipeline.cpp "speaker detection timing (start)"
+[=[    Result res;
+    if (!pcm || n_samples <= 0 || !embed || embed_dim <= 0 || speech.empty())
+        return res;
+]=]
+[=[    Result res;
+    if (!pcm || n_samples <= 0 || !embed || embed_dim <= 0 || speech.empty())
+        return res;
+    const auto tt_t0 = std::chrono::steady_clock::now(); // tt_engine: timing
+]=])
+tmx_patch_source(TMX_PATCH_DIARIZE_TIMING_2 src/core/foxnose_pipeline.cpp "speaker detection timing (grouping)"
+[=[    std::vector<int> labels =
+        core_spectral::cluster_speakers(emb.data(), n, embed_dim, params.min_speakers, params.max_speakers,
+                                        params.num_speakers, &est, params.seed, params.n_workers);
+    res.reason = est.reason ? est.reason : "";]=]
+[=[    // tt_engine: the grouping may use more threads than there are embedders (one
+    // on a graphics card), and how long each part took is reported.
+    const auto tt_t1 = std::chrono::steady_clock::now();
+    int tt_group_threads = params.n_workers;
+    if (const char* e = std::getenv("TT_DIARIZE_THREADS"))
+        tt_group_threads = std::max(tt_group_threads, std::atoi(e));
+    std::vector<int> labels =
+        core_spectral::cluster_speakers(emb.data(), n, embed_dim, params.min_speakers, params.max_speakers,
+                                        params.num_speakers, &est, params.seed, tt_group_threads);
+    if (std::getenv("TT_DIARIZE_PROGRESS")) {
+        const auto tt_t2 = std::chrono::steady_clock::now();
+        std::fprintf(stdout, "Speakers: listened to %d pieces of speech in %.1f s, grouped the voices in %.1f s\n", n,
+                     std::chrono::duration<double>(tt_t1 - tt_t0).count(),
+                     std::chrono::duration<double>(tt_t2 - tt_t1).count());
+        std::fflush(stdout);
+    }
+    res.reason = est.reason ? est.reason : "";]=])

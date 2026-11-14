@@ -12,6 +12,7 @@
 #include <QList>
 #include <QSizeF>
 #include <QString>
+#include <QStringList>
 
 namespace tt {
 
@@ -27,6 +28,7 @@ struct PdfDocument {
     QString note;      // a line in italics under the title (empty: none)
     QSizeF pageSize;   // in points; empty = A4, or Letter in the US and Canada
     QString language;  // of the text ("de", "ja", ...): picks fonts for CJK; empty = any
+    QStringList boldStarts;  // speakers' names ("Anna:"): a paragraph that starts with one has it in bold
     QList<PdfBlock> blocks;
     QString markdown;  // if set, rendered as Markdown instead of `blocks` (a translated .md)
 };
@@ -52,8 +54,10 @@ bool writePdf(const PdfDocument& doc, const QString& path, QString* error);
 // The text of a transcript result as a PDF: the title, an AI note in italics
 // when the text starts with one ("[Summary written by ...]"), the paragraphs
 // (blank lines separate them).
+// A paragraph that starts with one of `boldStarts` (speakers' names, "Anna:")
+// has it in bold.
 bool writeTextPdf(const QString& textPath, const QString& pdfPath, const QString& title, QString* error,
-                  const QString& language = QString());
+                  const QString& language = QString(), const QStringList& boldStarts = QStringList());
 
 // ---- the Markdown the engine translates in place of a PDF ---------------------
 // Headings as "#", one paragraph per line, page breaks and the page size as

@@ -11,10 +11,12 @@ subtitle, Word and PDF files).
 The window has four tabs:
 
   Transcribe          the speech in an audio or video file as text (.txt),
-                      subtitles (.srt), a Word document or a PDF; optional AI
-                      post-processing (smart paragraphs, a corrected copy, a
-                      summary). "Translate..." takes the transcript straight
-                      to the Translate tab.
+                      subtitles (.srt), a Word document or a PDF; with "Several
+                      speakers", who is speaking (their names in the
+                      transcript; you can listen to and name each one);
+                      optional AI post-processing (smart paragraphs, a
+                      corrected copy, a summary). "Translate..." takes the
+                      transcript straight to the Translate tab.
   Translate           text you type or paste, or a .txt, .md, .srt, Word or
                       PDF file, translated with a local language model. The
                       layout is kept: paragraphs, subtitle timing, Word

@@ -116,6 +116,27 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- a transcript with speakers: their names in bold, the text unchanged ----
+    {
+        const QString txt = dir.filePath(QStringLiteral("talk.txt")), path = dir.filePath(QStringLiteral("talk.pdf"));
+        {
+            QFile f(txt);
+            f.open(QIODevice::WriteOnly);
+            f.write("Anna Bo: Good morning, everyone.\n\nBen: Thank you. And Anna Bo: said so.\n\nHe went on.\n");
+        }
+        QString error;
+        CHECK(tt::writeTextPdf(txt, path, QStringLiteral("Talk"), &error, QString(),
+                               {QStringLiteral("Anna:"), QStringLiteral("Anna Bo:"), QStringLiteral("Ben:")}));
+        if (const QByteArray keep = qgetenv("TT_KEEP_PDF"); !keep.isEmpty()) QFile::copy(path, QString::fromLocal8Bit(keep));
+        if (pdfium) {
+            const tt::PdfReadResult r = tt::readPdf(path);
+            CHECK(r.ok);
+            const QString text = allText(r.doc);
+            CHECK(text.contains(QStringLiteral("Anna Bo: Good morning, everyone.")));
+            CHECK(text.contains(QStringLiteral("Ben: Thank you. And Anna Bo: said so.")));
+        }
+    }
+
     // ---- a scanned PDF (only a picture): no text to translate ------------------
     {
         const QString path = dir.filePath(QStringLiteral("scan.pdf"));

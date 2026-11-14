@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.24)
 cmake_policy(SET CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "")
 
-project(transcribe_multi VERSION 1.0 LANGUAGES C CXX)
+project(transcribe_multi VERSION 1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -113,7 +113,10 @@ if(TRANSCRIBE_BUILD_GUI)
         src/gui/main.cpp
         src/gui/mainwindow.cpp
         src/gui/mainwindow.h
+        src/gui/speakers_dialog.h
         ${PK_COMMON_DIR}/src/model_catalog.cpp  # the models' languages, for the Help window
+        # the speakers file (several speakers: the Speakers window reads and writes it)
+        ${PK_COMMON_DIR}/src/speakers.cpp ${PK_COMMON_DIR}/src/srt.cpp ${PK_COMMON_DIR}/src/utf8_text.cpp
         ${PK_COMMON_QT_SOURCES})
     target_include_directories(transcribe_multi_gui PRIVATE ${PK_COMMON_INCLUDE_DIRS} ${PK_COMMON_QT_INCLUDE_DIRS})
     if(WIN32)
@@ -148,6 +151,7 @@ endif()
 if(TRANSCRIBE_BUILD_CLI AND TRANSCRIBE_BUILD_GUI)
     enable_testing()
     add_executable(transcribe_cpp_gui_tests tests/test_gui.cpp src/gui/mainwindow.h ${PK_COMMON_DIR}/src/model_catalog.cpp
+        ${PK_COMMON_DIR}/src/speakers.cpp ${PK_COMMON_DIR}/src/srt.cpp ${PK_COMMON_DIR}/src/utf8_text.cpp
         ${PK_COMMON_QT_SOURCES})
     target_include_directories(transcribe_cpp_gui_tests PRIVATE src ${PK_COMMON_INCLUDE_DIRS} ${PK_COMMON_QT_INCLUDE_DIRS})
     target_link_libraries(transcribe_cpp_gui_tests PRIVATE Qt6::Widgets)

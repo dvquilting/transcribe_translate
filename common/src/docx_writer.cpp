@@ -103,14 +103,19 @@ std::string xml(const std::string& s) {
     return out;
 }
 
-// One paragraph; '\n' inside becomes a line break.
-std::string paragraph(const std::string& text, const char* style) {
+// One paragraph; '\n' inside becomes a line break. Its first `bold` bytes are bold.
+std::string paragraph(const std::string& text, const char* style, size_t bold = 0) {
     std::string p = "<w:p>";
     if (style) p += std::string("<w:pPr><w:pStyle w:val=\"") + style + "\"/></w:pPr>";
     size_t start = 0;
     while (true) {
         const size_t nl = text.find('\n', start);
-        const std::string line = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        const std::string whole = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        const size_t b = start == 0 && bold <= whole.size() ? bold : 0;
+        if (b > 0)
+            p += "<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space=\"preserve\">" + xml(std::string(whole, 0, b)) +
+                 "</w:t></w:r>";
+        const std::string line(whole, b);
         p += "<w:r><w:t xml:space=\"preserve\">" + xml(line) + "</w:t></w:r>";
         if (nl == std::string::npos) break;
         p += "<w:r><w:br/></w:r>";
@@ -196,7 +201,12 @@ std::string make_docx(const DocxText& doc) {
     std::string body;
     if (!doc.title.empty()) body += paragraph(doc.title, "Title");
     if (!doc.note.empty()) body += paragraph(doc.note, "Subtitle");
-    for (const auto& p : text_paragraphs(doc.body)) body += paragraph(p, nullptr);
+    for (const auto& p : text_paragraphs(doc.body)) {
+        size_t bold = 0;  // the longest name it starts with ("Anna B:" before "Anna:")
+        for (const auto& s : doc.bold_starts)
+            if (s.size() > bold && p.compare(0, s.size(), s) == 0) bold = s.size();
+        body += paragraph(p, nullptr, bold);
+    }
     const std::string document =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" +

@@ -689,6 +689,17 @@ bool writePdf(const PdfDocument& d, const QString& path, QString* error) {
             // Line breaks inside a paragraph stay line breaks (QChar::LineSeparator).
             QString t = text;
             t.replace(QLatin1Char('\n'), QChar::LineSeparator);
+            // A speaker's name at the start of a paragraph, in bold (the longest that fits).
+            qsizetype bold = 0;
+            if (level == 0 && !italic)
+                for (const QString& s : d.boldStarts)
+                    if (s.size() > bold && t.startsWith(s)) bold = s.size();
+            if (bold > 0) {
+                QTextCharFormat bf2 = cf;
+                bf2.setFontWeight(QFont::Bold);
+                c.insertText(t.left(bold), bf2);
+                t.remove(0, bold);
+            }
             c.insertText(t, cf);
         };
         if (d.titleHeading && !d.title.isEmpty()) addBlock(d.title, 1, false);
@@ -734,7 +745,7 @@ PdfDocument pdfFromText(const QString& textIn) {
 }
 
 bool writeTextPdf(const QString& textPath, const QString& pdfPath, const QString& title, QString* error,
-                  const QString& language) {
+                  const QString& language, const QStringList& boldStarts) {
     QFile in(textPath);
     if (!in.open(QIODevice::ReadOnly)) {
         if (error) *error = in.errorString();
@@ -744,6 +755,7 @@ bool writeTextPdf(const QString& textPath, const QString& pdfPath, const QString
     d.title = title;
     d.titleHeading = true;
     d.language = language;
+    d.boldStarts = boldStarts;
     if (!d.blocks.isEmpty() && d.blocks.first().text.startsWith(QLatin1Char('[')) &&
         d.blocks.first().text.endsWith(QLatin1Char(']')))
         d.note = d.blocks.takeFirst().text;

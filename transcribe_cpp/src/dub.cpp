@@ -1159,13 +1159,19 @@ void speakers_usage() {
         "                            (the speakers file lists those; use them for the dub)\n"
         "      --num-speakers N      how many people speak (default: detect, up to 8)\n"
         "      --samples-dir DIR     write a short sample of each speaker, speaker_1.wav ...\n"
+        "      --words FILE          the word timings of the transcription (\"transcribe_multi\n"
+        "                            transcribe --words\"): subtitles are split exactly\n"
+        "                            between the words where the speaker changes\n"
+        "      --device DEV          cuda or vulkan: listen to the voices on that graphics card\n"
+        "                            (experimental; falls back to the processor if it fails).\n"
+        "                            auto (default) and cpu use the processor\n"
         "      --threads N, --models-dir DIR\n");
 }
 
 }  // namespace
 
 int speakers_main(const std::vector<std::string>& av) {
-    std::string media, srt, output, split_srt, samples_dir, models_dir;
+    std::string media, srt, output, split_srt, samples_dir, models_dir, words_file, device = "auto";
     int num_speakers = 0, threads = 0;
     auto die = [](const std::string& m) {
         std::fprintf(stderr, "Error: %s\n", m.c_str());
@@ -1190,9 +1196,10 @@ int speakers_main(const std::vector<std::string>& av) {
         else if (o == "--split-srt") split_srt = need(i);
         else if (o == "--num-speakers") num_speakers = whole(o, need(i), 0, 8);
         else if (o == "--samples-dir") samples_dir = need(i);
+        else if (o == "--words") words_file = need(i);
         else if (o == "--models-dir") models_dir = need(i);
         else if (o == "--threads") threads = whole(o, need(i), 0, 1024);
-        else if (o == "--device") need(i);  // accepted for symmetry: speaker detection runs on the processor
+        else if (o == "--device") device = need(i);
         else if (!o.empty() && o[0] == '-') die("unknown option " + o + " (see speakers --help)");
         else if (media.empty()) media = o;
         else die("unexpected argument " + o);
@@ -1234,13 +1241,49 @@ int speakers_main(const std::vector<std::string>& av) {
         opts.num_speakers = num_speakers;
         std::vector<crispasr_diarize_turn_abi> turns_abi(4096);
         int32_t n_turns = 0;
-        int rc = detect(pcm.data(), nullptr, (int32_t)pcm.size(), 0, segs.data(), (int32_t)segs.size(), &opts,
-                        turns_abi.data(), (int32_t)turns_abi.size(), &n_turns);
-        if (rc == 2) {  // more turns than room: again with enough
-            turns_abi.resize((size_t)n_turns);
-            rc = detect(pcm.data(), nullptr, (int32_t)pcm.size(), 0, segs.data(), (int32_t)segs.size(), &opts,
-                        turns_abi.data(), (int32_t)turns_abi.size(), &n_turns);
+        auto set_env = [](const char* name, const std::string& value) {
+#ifdef _WIN32
+            _putenv_s(name, value.c_str());  // (an empty value removes it)
+#else
+            if (value.empty()) unsetenv(name);
+            else setenv(name, value.c_str(), 1);
+#endif
+        };
+        // CrispASR (as patched by this build, cmake/patch_crispasr.cmake) then prints
+        // "progress: speakers N/100 percent" while it listens to the voices and how
+        // long each part took, and groups the voices with all the threads.
+        set_env("TT_DIARIZE_PROGRESS", "1");
+        set_env("TT_DIARIZE_THREADS", std::to_string(opts.n_threads));
+        const std::vector<crispasr_diarize_seg_abi> segs_in = segs;
+        auto run = [&] {
+            segs = segs_in;
+            int rc = detect(pcm.data(), nullptr, (int32_t)pcm.size(), 0, segs.data(), (int32_t)segs.size(), &opts,
+                            turns_abi.data(), (int32_t)turns_abi.size(), &n_turns);
+            if (rc == 2) {  // more turns than room: again with enough
+                turns_abi.resize((size_t)n_turns);
+                segs = segs_in;
+                rc = detect(pcm.data(), nullptr, (int32_t)pcm.size(), 0, segs.data(), (int32_t)segs.size(), &opts,
+                            turns_abi.data(), (int32_t)turns_abi.size(), &n_turns);
+            }
+            return rc;
+        };
+        // The voice model on a graphics card, when one is asked for by name
+        // (experimental: CrispASR's default, and "auto", is the processor).
+        int rc = -1;
+        if (device == "cuda" || device == "vulkan") {
+            std::string note;
+            const std::string dev = choose_device(device, &note);  // throws if cuda can't work
+            if (!note.empty()) say("Note: " + note);
+            if (dev != "cpu") {
+                say("Listening to the voices on the graphics card (" + dev + ") ...");
+                crispasr().crispasr_set_gpu_backend(dev.c_str());
+                set_env("CRISPASR_WESPEAKER_GPU", "1");
+                rc = run();
+                set_env("CRISPASR_WESPEAKER_GPU", "");
+                if (rc != 0) say("Note: that failed on the graphics card; using the processor.");
+            }
         }
+        if (rc != 0) rc = run();
         if (rc != 0) throw std::runtime_error("speaker detection failed (code " + std::to_string(rc) + ")");
         turns_abi.resize(std::min(turns_abi.size(), (size_t)std::max(0, n_turns)));
 
@@ -1249,7 +1292,12 @@ int speakers_main(const std::vector<std::string>& av) {
             if (t.t1_cs > t.t0_cs) turns.push_back({t.t0_cs / 100.0, t.t1_cs / 100.0, t.speaker});
         std::vector<int> labels;
         for (const auto& s : segs) labels.push_back(s.speaker);
-        auto parts = split_by_speaker(cues, labels, turns);
+        std::vector<Word> words;
+        if (!words_file.empty()) {
+            words = parse_words(read_text_file(words_file));
+            if (words.empty()) say("Note: no word timings in " + words_file + "; the subtitles are split by their length");
+        }
+        auto parts = split_by_speaker(cues, labels, turns, 1.0, words);
 
         // Speakers numbered in the order they first speak in the subtitles.
         std::map<int, int> number;

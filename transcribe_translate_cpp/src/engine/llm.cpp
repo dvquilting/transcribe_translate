@@ -158,10 +158,16 @@ const char* kPartFormat =
 
 // Correct one piece of text. If the prompt plus the expected answer would not
 // fit in the context window, the piece is halved and each half corrected.
-std::string polish_piece(ChatModel& llm, const std::string& input, PolishStats& st) {
+std::string polish_piece(ChatModel& llm, const std::string& input, PolishStats& st,
+                         const std::vector<std::string>* labels) {
+    const std::string system =
+        std::string(kPolishSystem) +
+        (labels ? "\n- A paragraph may start with the speaker's name and a colon (\"Anna: ...\"). Keep those names "
+                  "exactly as they are, each at the start of its paragraph."
+                : "");
     const int w_in = count_words(input);
-    const int n_in = llm.count_tokens(kPolishSystem, input);
-    const int n_text = n_in - llm.count_tokens(kPolishSystem, "");
+    const int n_in = llm.count_tokens(system, input);
+    const int n_text = n_in - llm.count_tokens(system, "");
     const int max_tokens = std::max((int)(w_in * 2.2), (int)(n_text * 1.3)) + 96;
     if (n_in + max_tokens > llm.context_size() && w_in > 8) {
         // Split between paragraphs when there are several, else between words.
@@ -177,15 +183,15 @@ std::string polish_piece(ChatModel& llm, const std::string& input, PolishStats& 
         }
         const char* sep = paras.size() > 1 ? "\n\n" : " ";
         std::string r;
-        for (const auto& h : halves) r += (r.empty() ? "" : sep) + polish_piece(llm, h, st);
+        for (const auto& h : halves) r += (r.empty() ? "" : sep) + polish_piece(llm, h, st, labels);
         return r;
     }
-    std::string out = drop_preface(llm.ask(kPolishSystem, input, max_tokens, 0.0f), input);
+    std::string out = drop_preface(llm.ask(system, input, max_tokens, 0.0f), input);
     const int w_out = count_words(out);
     // Reject edits that changed the amount of content: a cleanup should keep
     // almost every word. Fall back to the original text for this piece.
     const int allowed = std::max(4, (int)std::lround(w_in * 0.12));
-    if (w_out == 0 || std::abs(w_out - w_in) > allowed) {
+    if (w_out == 0 || std::abs(w_out - w_in) > allowed || (labels && !keeps_speaker_labels(input, out, *labels))) {
         out = input;
         ++st.kept_original;
     }
@@ -198,7 +204,8 @@ std::string polish_piece(ChatModel& llm, const std::string& input, PolishStats& 
 // Spelling / grammar cleanup
 // ---------------------------------------------------------------------------
 
-std::string polish_transcript(ChatModel& llm, const std::string& text, LlmProgress progress, PolishStats* stats) {
+std::string polish_transcript(ChatModel& llm, const std::string& text, LlmProgress progress, PolishStats* stats,
+                              const std::vector<std::string>* labels) {
     constexpr int kChunkWords = 300;  // small chunks keep the model faithful and output bounded
 
     // Group paragraphs into chunks of up to ~kChunkWords words (a very long paragraph
@@ -210,7 +217,7 @@ std::string polish_transcript(ChatModel& llm, const std::string& text, LlmProgre
     std::vector<std::string> outputs;
     for (size_t i = 0; i < chunks.size(); ++i) {
         PolishStats piece;  // counts rejected pieces; report each chunk at most once
-        outputs.push_back(polish_piece(llm, chunks[i].text, piece));
+        outputs.push_back(polish_piece(llm, chunks[i].text, piece, labels));
         if (piece.kept_original > 0) ++st.kept_original;
         if (progress) progress((int)i + 1, (int)chunks.size());
     }

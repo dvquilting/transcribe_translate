@@ -61,7 +61,10 @@ struct PolishStats {
 // the wording. `text` is paragraph-formatted (blank lines between paragraphs);
 // paragraph breaks are preserved. Chunks whose correction differs too much from
 // the original (the model added, dropped or rewrote content) keep the original.
-std::string polish_transcript(ChatModel& llm, const std::string& text, LlmProgress progress, PolishStats* stats);
+// Several speakers: `labels` are the names that start paragraphs ("Anna:");
+// a correction that loses one (or a paragraph break) is rejected too.
+std::string polish_transcript(ChatModel& llm, const std::string& text, LlmProgress progress, PolishStats* stats,
+                              const std::vector<std::string>* labels = nullptr);
 
 struct ParagraphStats {
     int windows = 0;

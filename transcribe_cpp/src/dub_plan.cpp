@@ -329,8 +329,204 @@ size_t text_split_point(const std::string& text, double frac) {
     return best;
 }
 
+std::string format_words(const std::vector<Word>& words) {
+    std::string out;
+    char b[64];
+    for (const auto& w : words) {
+        const std::string t = normalize_space(w.text);
+        if (t.empty() || t.find('\t') != std::string::npos) continue;
+        std::snprintf(b, sizeof(b), "%.3f\t%.3f\t", w.start, w.end);
+        out += b + t + "\n";
+    }
+    return out;
+}
+
+std::vector<Word> parse_words(const std::string& text) {
+    std::vector<Word> out;
+    std::istringstream in(text);
+    for (std::string line; std::getline(in, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+        if (b == std::string::npos) continue;
+        char* e1 = nullptr;
+        char* e2 = nullptr;
+        const std::string s0 = line.substr(0, a), s1 = line.substr(a + 1, b - a - 1);
+        const double t0 = std::strtod(s0.c_str(), &e1), t1 = std::strtod(s1.c_str(), &e2);
+        if (e1 == s0.c_str() || e2 == s1.c_str() || !std::isfinite(t0) || !std::isfinite(t1)) continue;
+        Word w;
+        w.start = t0, w.end = std::max(t0, t1), w.text = normalize_space(line.substr(b + 1));
+        if (!w.text.empty()) out.push_back(std::move(w));
+    }
+    std::stable_sort(out.begin(), out.end(), [](const Word& x, const Word& y) { return x.start < y.start; });
+    return out;
+}
+
+namespace {
+
+// Who speaks during [s, e]: the turn overlapping it most, else the nearest one
+// within a second (-1: none).
+int speaker_at(const std::vector<SpeakerTurn>& turns, double s, double e) {
+    int best = -1;
+    double best_overlap = 0, best_gap = 1.0;
+    for (const auto& t : turns) {
+        const double o = std::min(e, t.end) - std::max(s, t.start);
+        if (o > best_overlap) best_overlap = o, best = t.speaker;
+    }
+    if (best >= 0) return best;
+    for (const auto& t : turns) {
+        const double gap = t.start > e ? t.start - e : s > t.end ? s - t.end : 0.0;
+        if (gap < best_gap) best_gap = gap, best = t.speaker;
+    }
+    return best;
+}
+
+// One subtitle split by speaker with the transcription's word timings. False
+// when there is nothing to go on (fewer than two of its words, or no turns).
+// The speaker of each word (-1: nobody heard), with the detection's slips
+// taken out: a few words given to someone else in the middle of a speaker's
+// sentence ("... I went [home] and ..."). Speaker detection listens in windows
+// of about a second, and one window that sounds different puts a word or two
+// with another speaker. A real remark in between ("Yes.") is a sentence of its
+// own - the words before it end a sentence and so does it - and stays, as does
+// anything longer than `max_slip` seconds.
+std::vector<int> word_speakers(const std::vector<Word>& words, const std::vector<SpeakerTurn>& turns,
+                               double max_slip = 1.5) {
+    std::vector<int> who(words.size(), -1);
+    if (turns.empty()) return who;
+    std::vector<size_t> order;  // the words that are spoken text, in time
+    for (size_t k = 0; k < words.size(); ++k)
+        if (!normalize_space(words[k].text).empty()) order.push_back(k);
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return words[a].start < words[b].start; });
+    for (size_t k : order) who[k] = speaker_at(turns, words[k].start, words[k].end);
+    struct Run {
+        size_t a, b;  // order[a, b)
+        int speaker;
+    };
+    for (;;) {
+        std::vector<Run> runs;
+        for (size_t k = 0; k < order.size(); ++k) {
+            const int s = who[order[k]];
+            if (s < 0) continue;  // (filled from the neighbours by the caller)
+            if (!runs.empty() && runs.back().speaker == s) runs.back().b = k + 1;
+            else runs.push_back({k, k + 1, s});
+        }
+        // The shortest slip first: taking one out can join its neighbours.
+        size_t pick = runs.size();
+        double pick_len = max_slip;
+        for (size_t r = 1; r + 1 < runs.size(); ++r) {
+            if (runs[r - 1].speaker != runs[r + 1].speaker) continue;
+            const Word& first = words[order[runs[r].a]];
+            const Word& last = words[order[runs[r].b - 1]];
+            const double len = last.end - first.start;
+            if (len >= pick_len) continue;
+            const bool own_sentence = ends_sentence(normalize_space(words[order[runs[r].a - 1]].text)) &&
+                                      ends_sentence(normalize_space(last.text));
+            if (!own_sentence) pick = r, pick_len = len;
+        }
+        if (pick == runs.size()) break;
+        for (size_t k = runs[pick].a; k < runs[pick].b; ++k) who[order[k]] = runs[pick - 1].speaker;
+    }
+    return who;
+}
+
+bool split_cue_by_words(const pk::SrtCue& c, const std::string& text, int index, int label,
+                        const std::vector<Word>& words, const std::vector<int>& word_who,
+                        const std::vector<SpeakerTurn>& turns, double min_part, std::vector<SpeakerPart>& out) {
+    if (turns.empty()) return false;
+    std::vector<const Word*> cw;
+    std::vector<int> who;
+    for (size_t k = 0; k < words.size(); ++k) {
+        const Word& w = words[k];
+        const double mid = 0.5 * (w.start + w.end);
+        if (mid >= c.start - 0.01 && mid <= c.end + 0.01 && !normalize_space(w.text).empty())
+            cw.push_back(&w), who.push_back(word_who[k]);
+    }
+    if (cw.size() < 2) return false;
+    for (size_t k = 1; k < who.size(); ++k)  // words nobody was heard in: the speaker before (or after)
+        if (who[k] < 0) who[k] = who[k - 1];
+    for (size_t k = who.size(); k-- > 1;)
+        if (who[k - 1] < 0) who[k - 1] = who[k];
+    struct Run {
+        size_t a, b;  // words [a, b)
+        int speaker;
+    };
+    std::vector<Run> runs;
+    for (size_t k = 0; k < who.size(); ++k)
+        if (!runs.empty() && runs.back().speaker == who[k]) runs.back().b = k + 1;
+        else runs.push_back({k, k + 1, who[k]});
+    auto dur = [&](const Run& r) { return cw[r.b - 1]->end - cw[r.a]->start; };
+    // Very short changes (a cough, a breath, one misheard window) join the
+    // neighbour that speaks longer.
+    while (runs.size() > 1) {
+        size_t k = 0;
+        for (size_t j = 1; j < runs.size(); ++j)
+            if (dur(runs[j]) < dur(runs[k])) k = j;
+        if (dur(runs[k]) >= min_part) break;
+        const bool left = k > 0 && (k + 1 >= runs.size() || dur(runs[k - 1]) >= dur(runs[k + 1]));
+        if (left) runs[k - 1].b = runs[k].b;
+        else runs[k + 1].a = runs[k].a;
+        runs.erase(runs.begin() + (long)k);
+        for (size_t j = 1; j < runs.size();)
+            if (runs[j].speaker == runs[j - 1].speaker) {
+                runs[j - 1].b = runs[j].b;
+                runs.erase(runs.begin() + (long)j);
+            } else {
+                ++j;
+            }
+    }
+    if (runs.size() == 1) {
+        out.push_back({c.start, c.end, text, runs[0].speaker >= 0 ? runs[0].speaker : label, index});
+        return true;
+    }
+    // Where each word starts in the subtitle's text (they are its words, so they
+    // are found in order); failing that, by the share of the characters before it.
+    std::vector<size_t> pos(cw.size(), std::string::npos);
+    {
+        size_t from = 0;
+        bool all = true;
+        for (size_t k = 0; k < cw.size() && all; ++k) {
+            const std::string t = normalize_space(cw[k]->text);
+            const size_t at = text.find(t, from);
+            if (at == std::string::npos) all = false;
+            else pos[k] = at, from = at + t.size();
+        }
+        if (!all) {
+            size_t total = 0;
+            std::vector<size_t> before(cw.size());
+            for (size_t k = 0; k < cw.size(); ++k) before[k] = total, total += utf8_length(normalize_space(cw[k]->text)) + 1;
+            for (size_t k = 0; k < cw.size(); ++k) pos[k] = text_split_point(text, (double)before[k] / (double)total);
+        }
+    }
+    size_t from = 0;
+    double part_start = c.start;
+    for (size_t r = 1; r < runs.size(); ++r) {
+        size_t at = pos[runs[r].a];
+        // The split goes before the word, after any punctuation that ends the
+        // previous one (a word's position never points into a word before it).
+        if (at == std::string::npos || at <= from || at >= text.size()) continue;
+        const std::string first = normalize_space(text.substr(from, at - from));
+        if (first.empty()) continue;
+        const double change = 0.5 * (cw[runs[r].a - 1]->end + cw[runs[r].a]->start);
+        out.push_back({part_start, change, first, runs[r - 1].speaker, index});
+        from = at, part_start = change;
+    }
+    out.push_back({part_start, c.end, normalize_space(text.substr(from)), runs.back().speaker, index});
+    // Two neighbouring parts that ended up with one speaker (a split that
+    // couldn't be placed) are one part.
+    for (size_t k = out.size(); k-- > 1;)
+        if (out[k].group == index && out[k - 1].group == index && out[k].speaker == out[k - 1].speaker) {
+            out[k - 1].text += " " + out[k].text;
+            out[k - 1].end = out[k].end;
+            out.erase(out.begin() + (long)k);
+        }
+    return true;
+}
+
+}  // namespace
+
 std::vector<SpeakerPart> split_by_speaker(const std::vector<pk::SrtCue>& cues, const std::vector<int>& labels,
-                                          const std::vector<SpeakerTurn>& turns_in, double min_part) {
+                                          const std::vector<SpeakerTurn>& turns_in, double min_part,
+                                          const std::vector<Word>& words, double min_word_part) {
     std::vector<SpeakerTurn> turns = turns_in;
     std::stable_sort(turns.begin(), turns.end(), [](const SpeakerTurn& a, const SpeakerTurn& b) { return a.start < b.start; });
     std::vector<SpeakerPart> out;
@@ -338,11 +534,14 @@ std::vector<SpeakerPart> split_by_speaker(const std::vector<pk::SrtCue>& cues, c
         double start, end;
         int speaker;
     };
+    const std::vector<int> word_who = words.empty() ? std::vector<int>() : word_speakers(words, turns);
     for (size_t i = 0; i < cues.size(); ++i) {
         const auto& c = cues[i];
         const std::string text = normalize_space(c.text);
         if (!c.timed || text.empty()) continue;
         const int label = i < labels.size() ? labels[i] : -1;
+        if (!words.empty() && split_cue_by_words(c, text, (int)i, label, words, word_who, turns, min_word_part, out))
+            continue;
         // Who speaks when inside this subtitle.
         std::vector<Run> runs;
         for (const auto& t : turns) {

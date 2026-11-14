@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "speakers_dialog.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -79,7 +80,9 @@ const ModelChoice kModels[] = {
 // summary): the title, the AI note in italics when the text starts with one
 // ("[Summary written by ...]"), then the paragraphs. Qt lays out the text with the
 // system's fonts (embedded in the PDF), so every script prints.
-bool writePdf(const QString& textPath, const QString& pdfPath, const QString& title, QString* error) {
+// A paragraph that starts with one of `boldStarts` (speakers' names, "Anna:") has it in bold.
+bool writePdf(const QString& textPath, const QString& pdfPath, const QString& title, QString* error,
+              const QStringList& boldStarts = QStringList()) {
     QFile in(textPath);
     if (!in.open(QIODevice::ReadOnly)) {
         if (error) *error = in.errorString();
@@ -97,8 +100,14 @@ bool writePdf(const QString& textPath, const QString& pdfPath, const QString& ti
     QString html = QStringLiteral("<h1>%1</h1>").arg(title.toHtmlEscaped());
     if (!note.isEmpty())
         html += QStringLiteral("<p style=\"color:#595959\"><i>%1</i></p>").arg(note.toHtmlEscaped());
-    for (const QString& p : paragraphs)
-        html += QStringLiteral("<p>%1</p>").arg(p.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")));
+    for (const QString& p : paragraphs) {
+        qsizetype bold = 0;  // the longest name it starts with ("Anna B:" before "Anna:")
+        for (const QString& s : boldStarts)
+            if (s.size() > bold && p.startsWith(s)) bold = s.size();
+        html += QStringLiteral("<p>%1%2</p>")
+                    .arg(bold > 0 ? QStringLiteral("<b>%1</b>").arg(p.left(bold).toHtmlEscaped()) : QString(),
+                         p.mid(bold).toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")));
+    }
 
     QSaveFile out(pdfPath);  // never a half-written PDF
     if (!out.open(QIODevice::WriteOnly)) {
@@ -157,6 +166,14 @@ QString helpHtml() {
         "go next to the input unless you choose another output file.</li>"
         "<li><b>Ask ARK to write punctuation:</b> ARK normally writes none, and a small punctuation model adds it "
         "afterwards; this asks ARK itself (experimental).</li>"
+        "<li><b>Several speakers:</b> finds who speaks when (any language; a small voice model, 24 MB) and writes "
+        "their names into the transcript. After the speech is written down, the <b>Speakers</b> window shows who "
+        "was found: listen to each one, type their names (otherwise they are <i>Speaker 1</i>, <i>Speaker 2</i>, "
+        "...), mark two that are really the same person, or detect again with the number of speakers you know. "
+        "In the text, each speaker's turn starts a new paragraph with their name (<i>Anna: ...</i>); in the "
+        "subtitles the name stands where the speaker changes. The corrected copy keeps the names, and the summary "
+        "can say who said what. It works best with clear recordings and different voices; people talking over each "
+        "other, similar voices and very short remarks are harder, so check the result.</li>"
         "</ul>"
 
         "<h3>AI post-processing (optional)</h3>"
@@ -173,7 +190,9 @@ QString helpHtml() {
         "<h3>Advanced</h3>"
         "<ul>"
         "<li><b>Device</b> chooses where the models run: <i>auto</i> uses an NVIDIA graphics card with CUDA, other "
-        "graphics cards with Vulkan, or the processor. <b>CPU threads</b> limits the processor threads used.</li>"
+        "graphics cards with Vulkan, or the processor. <b>CPU threads</b> limits the processor threads used. With "
+        "<b>Several speakers</b>, the voices are listened to on the processor; choosing <i>cuda</i> or "
+        "<i>vulkan</i> here tries the graphics card for that too (experimental).</li>"
         "<li><b>Chunk length:</b> how much audio the chunked models hear at a time (5-30 s).</li>"
         "<li><b>Sentences per paragraph:</b> the paragraph size of the text (and the fallback for Smart "
         "paragraphs).</li>"
@@ -319,6 +338,24 @@ void MainWindow::buildUi() {
     auto* formatBox = new QWidget;
     formatBox->setLayout(formatRow);
     of->addRow(tr("Save as:"), formatBox);
+
+    speakersCheck_ = new QCheckBox(tr("Several speakers: write who is speaking"));
+    speakersCheck_->setToolTip(tr("Finds the speakers (any language) and lets you check and name them before the "
+                                  "transcript is written.\nEach speaker's turn starts a new paragraph with their "
+                                  "name (\"Anna: ...\"); in the subtitles the name stands where the speaker changes."));
+    speakersCount_ = new QComboBox;
+    speakersCount_->addItem(tr("Detect how many"), 0);
+    for (int c = 2; c <= 8; ++c) speakersCount_->addItem(tr("%1 speakers").arg(c), c);
+    speakersCount_->setToolTip(tr("How many people speak, if you know: that is more reliable than detecting it, "
+                                  "and much faster for a long recording."));
+    auto* spkRow = new QWidget;
+    auto* spkLayout = new QHBoxLayout(spkRow);
+    spkLayout->setContentsMargins(0, 0, 0, 0);
+    spkLayout->addWidget(speakersCheck_);
+    spkLayout->addWidget(speakersCount_);
+    spkLayout->addStretch();
+    of->addRow(tr("Speakers:"), spkRow);
+    connect(speakersCheck_, &QCheckBox::toggled, this, &MainWindow::updateEnabledState);
 
     languageCombo_ = new QComboBox;
     for (const auto& [k, n] : kLanguages) languageCombo_->addItem(n, QString::fromLatin1(k));
@@ -505,7 +542,8 @@ void MainWindow::buildUi() {
     timingRow->addWidget(new QLabel(tr("Speed:")));
     timingRow->addWidget(ratioEdit_);
     postEdit_ = readOnlyField(10);
-    postEdit_->setToolTip(tr("Time spent on smart paragraphs, spelling/grammar correction and the summary"));
+    postEdit_->setToolTip(tr("Time after the transcription: finding the speakers, smart paragraphs, "
+                             "spelling/grammar correction and the summary"));
     postLabel_ = new QLabel(tr("AI post-processing:"));
     timingRow->addSpacing(12);
     timingRow->addWidget(postLabel_);
@@ -549,14 +587,19 @@ void MainWindow::updateEnabledState() {
         selectData(languageCombo_, QStringLiteral("en"));
     const bool srt = srtCheck_->isChecked();
     chunkSpin_->setEnabled(chunked);
-    alignCheck_->setEnabled(chunked && srt);
+    // Several speakers: the words are always timed (a subtitle is split between
+    // the words where the speaker changes).
+    const bool several = speakersCheck_->isChecked();
+    speakersCount_->setEnabled(several);
+    alignCheck_->setEnabled(chunked && srt && !several);
     languageCombo_->setEnabled(chunked);
     const bool ai = postProcessing();
     aiNote_->setVisible(ai);
     llmFileEdit_->setEnabled(ai);
-    if (!runner_.isRunning()) {
-        postLabel_->setVisible(ai);
-        postEdit_->setVisible(ai);
+    if (!running()) {
+        postLabel_->setText(!several ? tr("AI post-processing:") : ai ? tr("Speakers and AI:") : tr("Finding speakers:"));
+        postLabel_->setVisible(ai || several);
+        postEdit_->setVisible(ai || several);
     }
 }
 
@@ -591,11 +634,11 @@ void MainWindow::setInputFile(const QString& path) {
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
-    if (event->mimeData()->hasUrls() && !runner_.isActive()) event->acceptProposedAction();
+    if (event->mimeData()->hasUrls() && !running()) event->acceptProposedAction();
 }
 
 void MainWindow::dropEvent(QDropEvent* event) {
-    if (runner_.isActive()) return;
+    if (running()) return;
     for (const QUrl& u : event->mimeData()->urls()) {
         if (u.isLocalFile()) {
             setInputFile(u.toLocalFile());
@@ -613,39 +656,143 @@ QString MainWindow::cliPath() const {
 #endif
 }
 
-QStringList MainWindow::buildArguments(const QString& input) const {
+QString MainWindow::workFile(const char* name) const {
+    return QDir::toNativeSeparators(workDir_->filePath(QLatin1String(name)));
+}
+
+// The speech recognition's part of "transcribe_multi".
+QStringList MainWindow::speechArguments(const QString& input) const {
     const QString model = modelCombo_->currentData().toString();
     QStringList a{input,
                   QStringLiteral("-m"), model,
-                  QStringLiteral("-f"), cliFormats(),
-                  QStringLiteral("--language"), languageCombo_->currentData().toString(),
-                  QStringLiteral("--sentences-per-paragraph"), QString::number(paragraphSpin_->value())};
-    if (!outputEdit_->text().trimmed().isEmpty()) a << QStringLiteral("-o") << absolutePath(outputEdit_->text());
-    if (pdfCheck_->isChecked() && textDir_) a << QStringLiteral("--text-dir") << QDir::toNativeSeparators(textDir_->path());
+                  QStringLiteral("--language"), languageCombo_->currentData().toString()};
     if (deviceCombo_->currentText() != QLatin1String("auto"))
         a << QStringLiteral("--device") << deviceCombo_->currentText();
     if (threadsSpin_->value() > 0) a << QStringLiteral("--threads") << QString::number(threadsSpin_->value());
     if (isChunkedModel(model)) {
         a << QStringLiteral("--chunk-seconds") << QString::number(chunkSpin_->value(), 'g', 4);
-        if (!alignCheck_->isChecked()) a << QStringLiteral("--no-align");
+        if (!alignCheck_->isChecked() && !speakers_) a << QStringLiteral("--no-align");
     }
     if (!modelFileEdit_->text().trimmed().isEmpty())
         a << QStringLiteral("--model-file") << absolutePath(modelFileEdit_->text());
     if (!modelsDirEdit_->text().trimmed().isEmpty())
         a << QStringLiteral("--models-dir") << absolutePath(modelsDirEdit_->text());
-    if (polishCheck_->isChecked()) a << QStringLiteral("--polish");
-    if (summaryCheck_->isChecked()) a << QStringLiteral("--summary");
-    if (smartParaCheck_->isChecked()) a << QStringLiteral("--smart-paragraphs");
     if (model == QLatin1String("ark") && arkPunctCheck_->isChecked()) a << QStringLiteral("--ark-punctuation");
     if (punctCombo_->currentData().toString() != QLatin1String("auto"))
         a << QStringLiteral("--punctuation") << punctCombo_->currentData().toString();
-    if (postProcessing() && !llmFileEdit_->text().trimmed().isEmpty())
-        a << QStringLiteral("--llm-file") << absolutePath(llmFileEdit_->text());
     return a;
 }
 
+// "transcribe_multi" for the step that is starting. Several speakers:
+// first only the subtitles and word timings, into the work folder; at the end
+// the outputs, from those and the speakers.
+QStringList MainWindow::buildArguments(const QString& input) const {
+    QStringList a = speechArguments(input);
+    if (step_ == Step::Transcribe) {
+        a << QStringLiteral("-f") << QStringLiteral("srt") << QStringLiteral("-o") << workFile("source.srt")
+          << QStringLiteral("--words") << workFile("words.tsv");
+        return a;
+    }
+    a << QStringLiteral("-f") << cliFormats()
+      << QStringLiteral("--sentences-per-paragraph") << QString::number(paragraphSpin_->value());
+    if (!outputEdit_->text().trimmed().isEmpty()) a << QStringLiteral("-o") << absolutePath(outputEdit_->text());
+    if (pdfCheck_->isChecked() && textDir_) a << QStringLiteral("--text-dir") << QDir::toNativeSeparators(textDir_->path());
+    if (polishCheck_->isChecked()) a << QStringLiteral("--polish");
+    if (summaryCheck_->isChecked()) a << QStringLiteral("--summary");
+    if (smartParaCheck_->isChecked()) a << QStringLiteral("--smart-paragraphs");
+    if (postProcessing() && !llmFileEdit_->text().trimmed().isEmpty())
+        a << QStringLiteral("--llm-file") << absolutePath(llmFileEdit_->text());
+    if (step_ == Step::Finish) {
+        // Without the speakers (they could not be found): the subtitles as transcribed.
+        a << QStringLiteral("--from-srt") << workFile(speakersFailed_ ? "source.srt" : "split.srt");
+        if (QFileInfo::exists(workFile("words.tsv"))) a << QStringLiteral("--from-words") << workFile("words.tsv");
+        if (!speakersFailed_) a << QStringLiteral("--speakers-file") << workFile("speakers.txt");
+    }
+    return a;
+}
+
+QStringList MainWindow::speakersArguments() const {
+    QStringList a{QStringLiteral("speakers"), runInput_,
+                  QStringLiteral("--srt"), workFile("source.srt"),
+                  QStringLiteral("-o"), workFile("speakers.txt"),
+                  QStringLiteral("--split-srt"), workFile("split.srt"),
+                  QStringLiteral("--samples-dir"), workFile("samples")};
+    if (QFileInfo::exists(workFile("words.tsv"))) a << QStringLiteral("--words") << workFile("words.tsv");
+    if (numSpeakers_ > 0) a << QStringLiteral("--num-speakers") << QString::number(numSpeakers_);
+    if (deviceCombo_->currentText() != QLatin1String("auto"))
+        a << QStringLiteral("--device") << deviceCombo_->currentText();
+    if (threadsSpin_->value() > 0) a << QStringLiteral("--threads") << QString::number(threadsSpin_->value());
+    if (!modelsDirEdit_->text().trimmed().isEmpty())
+        a << QStringLiteral("--models-dir") << absolutePath(modelsDirEdit_->text());
+    return a;
+}
+
+void MainWindow::runStep(Step step) {
+    step_ = step;
+    const QStringList args = step == Step::Speakers ? speakersArguments() : buildArguments(runInput_);
+    QStringList shown;
+    for (const QString& s : args) shown << (s.contains(QLatin1Char(' ')) ? QLatin1Char('"') + s + QLatin1Char('"') : s);
+    appendLog((logView_->document()->isEmpty() ? QString() : QStringLiteral("\n")) + QStringLiteral("> transcribe_multi ") +
+              shown.join(QLatin1Char(' ')) + QLatin1Char('\n'));
+    statusLabel_->setText(step == Step::Speakers ? tr("Finding who speaks when...")
+                          : step == Step::Finish ? tr("Writing the transcript...")
+                                                 : tr("Starting..."));
+    progress_->setRange(0, 0);
+    runner_.start(cliPath(), args);
+}
+
+// After speaker detection: the user checks the speakers (names, two who are one
+// person) in the Speakers window, or asks for another detection.
+MainWindow::Review MainWindow::reviewSpeakers() {
+    const QString path = workFile("speakers.txt");
+    pk::SpeakerMap map;
+    std::string why;
+    {
+        QFile f(path);
+        const QByteArray b = f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        if (!pk::parse_speakers(std::string(b.constData(), (size_t)b.size()), &map, &why) || map.speakers.empty()) {
+            appendLog(QStringLiteral("\n") + tr("Could not read the speakers that were found (%1).")
+                                                 .arg(why.empty() ? tr("none listed") : QString::fromStdString(why)) +
+                      QStringLiteral("\n"));
+            return Review::Failed;
+        }
+    }
+    statusLabel_->setText(map.speakers.size() == 1
+                              ? tr("Found one speaker: check in the Speakers window.")
+                              : tr("Found %1 speakers: check them in the Speakers window.").arg(map.speakers.size()));
+    progress_->setRange(0, 1);
+    tt::SpeakersDialog dlg(map, workFile("samples"), tt::SpeakersDialog::Transcript, numSpeakers_, this);
+    pauseStartMs_ = runClock_.elapsed();  // the time in the window is not the run's
+    const int answer = dlg.exec();
+    pausedMs_ += runClock_.elapsed() - pauseStartMs_;
+    pauseStartMs_ = -1;
+    if (answer != QDialog::Accepted) return Review::Cancelled;
+    if (dlg.redetect) {
+        numSpeakers_ = dlg.countCombo->currentData().toInt();
+        appendLog(QStringLiteral("\n") +
+                  (numSpeakers_ > 0 ? tr("Detecting again with %1 speaker(s).").arg(numSpeakers_) : tr("Detecting again.")) +
+                  QStringLiteral("\n"));
+        return Review::Again;
+    }
+    const pk::SpeakerMap chosen = dlg.result(map);
+    const std::string text = pk::format_speakers(chosen);
+    QSaveFile out(path);
+    if (!out.open(QIODevice::WriteOnly) || out.write(text.data(), (qint64)text.size()) != (qint64)text.size() ||
+        !out.commit()) {
+        appendLog(QStringLiteral("\n") + tr("Could not write %1").arg(path) + QStringLiteral("\n"));
+        return Review::Failed;
+    }
+    QStringList names;
+    for (const auto& s : chosen.speakers) names << QString::fromStdString(s.name);
+    speakerLabels_.clear();  // names are written (and bold in the PDFs) with two or more speakers
+    if (names.size() >= 2)
+        for (const QString& n : names) speakerLabels_ << n + QLatin1Char(':');
+    appendLog(QStringLiteral("\n") + tr("Speakers: %1").arg(names.join(QStringLiteral(", "))) + QStringLiteral("\n"));
+    return Review::Continue;
+}
+
 void MainWindow::start() {
-    if (runner_.isActive()) return;
+    if (running() || runner_.isActive()) return;
     QString input = inputEdit_->text().trimmed();
     if (input.size() >= 2 && input.startsWith(QLatin1Char('"')) && input.endsWith(QLatin1Char('"')))
         input = input.mid(1, input.size() - 2);
@@ -678,12 +825,26 @@ void MainWindow::start() {
             return;
         }
     }
+    speakers_ = speakersCheck_->isChecked();
+    numSpeakers_ = speakersCount_->currentData().toInt();
+    speakersFailed_ = false;
+    speakerLabels_.clear();
+    workDir_.reset();
+    if (speakers_) {
+        workDir_ = std::make_unique<QTemporaryDir>();
+        if (!workDir_->isValid()) {
+            workDir_.reset();
+            QMessageBox::critical(this, tr("Transcribe"), tr("Could not create a temporary folder for the speakers."));
+            return;
+        }
+    }
     {
         const QString outText = absolutePath(outputEdit_->text());
         const QFileInfo base(outText.isEmpty() ? input : outText);
         pdfDir_ = base.dir().absolutePath();
         inputTitle_ = QFileInfo(input).completeBaseName();
     }
+    runInput_ = input;
     lastProblem_.clear();
     logView_->clear();
     transcriptView_->clear();
@@ -693,25 +854,22 @@ void MainWindow::start() {
     tabs_->setTabVisible(3, false);
     tabs_->setCurrentWidget(logView_);
 
-    const QStringList args = buildArguments(input);
-    QStringList shown;
-    for (const QString& s : args) shown << (s.contains(QLatin1Char(' ')) ? QLatin1Char('"') + s + QLatin1Char('"') : s);
-    appendLog(QStringLiteral("> transcribe_multi ") + shown.join(QLatin1Char(' ')) + QLatin1Char('\n'));
-
+    step_ = speakers_ ? Step::Transcribe : Step::Single;  // running() from here on
     setRunning(true);
-    statusLabel_->setText(tr("Starting..."));
     setEngine(QString(), QString(), false);
     audioSeconds_ = -1.0;
     transcribeSeconds_ = -1.0;
     audioLengthEdit_->setText(QStringLiteral("\u2014"));
     ratioEdit_->setText(QStringLiteral("\u2014"));
     postEdit_->setText(QStringLiteral("\u2014"));
-    postLabel_->setVisible(postProcessing());
-    postEdit_->setVisible(postProcessing());
+    postLabel_->setVisible(postProcessing() || speakers_);
+    postEdit_->setVisible(postProcessing() || speakers_);
+    pausedMs_ = 0;
+    pauseStartMs_ = -1;
     runClock_.start();
     tick_->start();
     updateTiming(false);
-    runner_.start(cliPath(), args);
+    runStep(step_);
 }
 
 QString MainWindow::cliFormats() const {
@@ -752,7 +910,7 @@ void MainWindow::makePdfs() {
         if (name.endsWith(QLatin1String(".txt"), Qt::CaseInsensitive)) name.chop(4);
         const QString pdf = QDir(pdfDir_).filePath(name + QStringLiteral(".pdf"));
         QString error;
-        if (writePdf(copy, pdf, inputTitle_, &error)) {
+        if (writePdf(copy, pdf, inputTitle_, &error, speakerLabels_)) {
             written_ << QDir::toNativeSeparators(pdf);
             appendLog(QStringLiteral("  wrote %1\n").arg(QDir::toNativeSeparators(pdf)));
         } else {
@@ -794,7 +952,7 @@ bool MainWindow::confirmOverwrite(const QString& input) {
 }
 
 void MainWindow::showModels() {
-    if (runner_.isActive()) return;
+    if (running()) return;
     // CrispASR's cache may hold other programs' models too: ours have the .src
     // sidecar CrispASR writes for every download.
     pk::ModelsDialog dlg({{tr("Speech recognition, spelling and voice models"),
@@ -832,6 +990,21 @@ void MainWindow::parseLine(const QString& line) {
         const int done = m.captured(2).toInt();
         const int total = m.captured(3).toInt();
         const QString key = m.captured(1);
+        if (key == QLatin1String("speakers")) {
+            // Listening to the voices, in percent; then they are grouped into speakers
+            // (short). Several threads report: a step back is ignored.
+            if (progress_->maximum() == 100 && done < progress_->value()) return;
+            if (statusLabel_->text() == tr("Finding who speaks when: grouping the voices...")) return;
+            if (done >= total) {
+                progress_->setRange(0, 0);
+                statusLabel_->setText(tr("Finding who speaks when: grouping the voices..."));
+            } else {
+                progress_->setRange(0, 100);
+                progress_->setValue(done);
+                statusLabel_->setText(tr("Finding who speaks when: %1%").arg(done));
+            }
+            return;
+        }
         const QString phase = key == QLatin1String("align")     ? tr("Aligning")
                               : key == QLatin1String("polish")  ? tr("Correcting spelling and grammar")
                               : key == QLatin1String("summary") ? tr("Summarizing")
@@ -870,7 +1043,8 @@ void MainWindow::parseLine(const QString& line) {
         return;
     }
     if (const auto m = wroteRe.match(line); m.hasMatch()) {
-        written_ << m.captured(1).trimmed();
+        // (Not the work files of the first steps with several speakers.)
+        if (step_ == Step::Single || step_ == Step::Finish) written_ << m.captured(1).trimmed();
         return;
     }
     static const QRegularExpression textRe(QStringLiteral("^\\s*text (.+)$"));
@@ -884,19 +1058,45 @@ void MainWindow::parseLine(const QString& line) {
         s.startsWith(QLatin1String("Transcribing")) || s.startsWith(QLatin1String("Audio :")) ||
         s.startsWith(QLatin1String("Chunks:")) || s.startsWith(QLatin1String("Correcting")) ||
         s.startsWith(QLatin1String("Writing summary")) || s.startsWith(QLatin1String("Note:")) ||
-        s.startsWith(QLatin1String("Finding paragraph")) || s.startsWith(QLatin1String("Paragraphs:")) ||
+        s.startsWith(QLatin1String("Finding")) || s.startsWith(QLatin1String("Paragraphs:")) ||
+        s.startsWith(QLatin1String("Speakers:")) ||
         s.startsWith(QLatin1String("Punctuation:")) || s.startsWith(QLatin1String("Warning:")) ||
         s.startsWith(QLatin1String("ARK instruction:"))) {
         statusLabel_->setText(s);
         if (s.startsWith(QLatin1String("Loading")) || s.startsWith(QLatin1String("Transcribing")) ||
             s.startsWith(QLatin1String("Correcting")) || s.startsWith(QLatin1String("Writing summary")) ||
-            s.startsWith(QLatin1String("Finding paragraph")))
+            s.startsWith(QLatin1String("Finding")))
             progress_->setRange(0, 0);
     }
 }
 
 // The output has been read to the end (the last line too) when this runs.
 void MainWindow::processFinished(int exitCode, bool cancelled) {
+    // Several speakers: the next step, unless this one failed or was cancelled.
+    if (!cancelled && step_ == Step::Transcribe && exitCode == 0) {
+        runStep(Step::Speakers);
+        return;
+    }
+    if (!cancelled && step_ == Step::Speakers) {
+        Review r = exitCode == 0 ? reviewSpeakers() : Review::Failed;
+        if (r == Review::Again) {
+            runStep(Step::Speakers);
+            return;
+        }
+        if (r == Review::Cancelled) {
+            cancelled = true;
+        } else {
+            // The speech is transcribed: without the speakers it is still written.
+            speakersFailed_ = r == Review::Failed;
+            if (speakersFailed_)
+                appendLog(QStringLiteral("\n") + tr("The speakers could not be found: the transcript is written "
+                                                    "without their names.") + QStringLiteral("\n"));
+            runStep(Step::Finish);
+            return;
+        }
+    }
+    step_ = Step::Idle;
+    workDir_.reset();
     tick_->stop();
     updateTiming(true);
     if ((cancelled || exitCode != 0) && transcribeSeconds_ < 0)
@@ -917,9 +1117,12 @@ void MainWindow::processFinished(int exitCode, bool cancelled) {
     } else if (exitCode == 0) {
         QStringList names;
         for (const QString& p : written_) names << QFileInfo(p).fileName();
-        statusLabel_->setText(engineBackend_.isEmpty()
-                                  ? tr("Done: %1").arg(names.join(QStringLiteral(", ")))
-                                  : tr("Done on %1: %2").arg(engineBackend_, names.join(QStringLiteral(", "))));
+        statusLabel_->setText((engineBackend_.isEmpty()
+                                   ? tr("Done: %1").arg(names.join(QStringLiteral(", ")))
+                                   : tr("Done on %1: %2").arg(engineBackend_, names.join(QStringLiteral(", ")))) +
+                              (speakersFailed_ ? QStringLiteral(" ") + tr("(without speaker names: the speakers could "
+                                                                         "not be found, see the log)")
+                                               : QString()));
         openBtn_->setEnabled(!written_.isEmpty());
         showTranscript();
     } else if (transcribeSeconds_ >= 0 && !written_.isEmpty()) {
@@ -940,6 +1143,8 @@ void MainWindow::processFinished(int exitCode, bool cancelled) {
 }
 
 void MainWindow::processFailedToStart() {
+    step_ = Step::Idle;
+    workDir_.reset();
     setRunning(false);
     tick_->stop();
     statusLabel_->setText(tr("Could not start transcribe_multi."));
@@ -1016,7 +1221,8 @@ void MainWindow::setEngine(const QString& backend, const QString& detail, bool l
 
 void MainWindow::updateTiming(bool finished) {
     if (!runClock_.isValid()) return;
-    const double elapsed = runClock_.elapsed() / 1000.0;
+    // (Not the time the Speakers window was open.)
+    const double elapsed = ((pauseStartMs_ >= 0 ? pauseStartMs_ : runClock_.elapsed()) - pausedMs_) / 1000.0;
     // Transcription time stops when the transcript is written; AI post-processing
     // after that is timed separately.
     const double transcribe = transcribeSeconds_ >= 0 ? transcribeSeconds_ : elapsed;
@@ -1060,6 +1266,8 @@ void MainWindow::loadSettings() {
     paragraphSpin_->setValue(s.value(QStringLiteral("paragraph"), 5).toInt());
     alignCheck_->setChecked(s.value(QStringLiteral("align"), true).toBool());
     modelsDirEdit_->setText(s.value(QStringLiteral("modelsDir")).toString());
+    speakersCheck_->setChecked(s.value(QStringLiteral("speakers"), false).toBool());
+    selectData(speakersCount_, s.value(QStringLiteral("numSpeakers"), 0));
     polishCheck_->setChecked(s.value(QStringLiteral("polish"), false).toBool());
     summaryCheck_->setChecked(s.value(QStringLiteral("summary"), false).toBool());
     smartParaCheck_->setChecked(s.value(QStringLiteral("smartParagraphs"), false).toBool());
@@ -1091,6 +1299,8 @@ void MainWindow::saveSettings() {
     s.setValue(QStringLiteral("paragraph"), paragraphSpin_->value());
     s.setValue(QStringLiteral("align"), alignCheck_->isChecked());
     s.setValue(QStringLiteral("modelsDir"), modelsDirEdit_->text());
+    s.setValue(QStringLiteral("speakers"), speakersCheck_->isChecked());
+    s.setValue(QStringLiteral("numSpeakers"), speakersCount_->currentData());
     s.setValue(QStringLiteral("polish"), polishCheck_->isChecked());
     s.setValue(QStringLiteral("summary"), summaryCheck_->isChecked());
     s.setValue(QStringLiteral("smartParagraphs"), smartParaCheck_->isChecked());
@@ -1100,13 +1310,15 @@ void MainWindow::saveSettings() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (runner_.isRunning() &&
+    if (running() &&
         QMessageBox::question(this, tr("Transcribe"), tr("A transcription is running. Stop it and quit?")) !=
             QMessageBox::Yes) {
         event->ignore();
         return;
     }
     runner_.stop();  // disconnected first: nothing reaches the closing window, even if the tool hangs
+    step_ = Step::Idle;
+    workDir_.reset();
     saveSettings();
     event->accept();
 }

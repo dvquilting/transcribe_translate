@@ -6,7 +6,7 @@ and `speech_translate_cpp` do, in one window with four tabs:
 
 | Tab | What it does |
 |---|---|
-| **Transcribe** | audio/video → .txt, .srt, Word, PDF; optional AI post-processing (smart paragraphs, corrected copy, summary). **Translate...** hands the transcript to the Translate tab. |
+| **Transcribe** | audio/video → .txt, .srt, Word, PDF; several speakers with their names in the transcript ("Anna: ..."); optional AI post-processing (smart paragraphs, corrected copy, summary). **Translate...** hands the transcript to the Translate tab. |
 | **Translate** | typed text, or .txt / .md / .srt / .docx / .pdf files, keeping the layout (a PDF is rebuilt as headings and paragraphs; .txt and .md can also be saved as PDF) |
 | **Speech translation** | audio/video → translated subtitles (original, bilingual, text, PDF), several speakers, and an optional dub in the speaker's (cloned) voice |
 | **History** | every job with the files it saved: open the file or its folder, or use the same input again (kept in `history.json` in the program's data folder) |
@@ -133,6 +133,16 @@ tt_engine translate report.docx -t de
 tt_engine speakers talk.mp4 --srt talk.srt -o speakers.txt
 tt_engine dub talk.mp4 --srt talk.de.srt -t de -o talk.de.dubbed.mp4
 transcribe_translate --speech talk.mp4      # the window, on a tab, with a file
+```
+
+A transcript with the speakers' names (what the Transcribe tab's "Several speakers" does, with the
+Speakers window between the second and third command): the speech once, who speaks when, then the
+outputs. Names can be changed in `speakers.txt` (`speaker <id> <name> ...` lines) before the last step.
+
+```
+tt_engine transcribe talk.mp4 -f srt -o work/source --words work/words.tsv
+tt_engine speakers talk.mp4 --srt work/source.srt --words work/words.tsv -o work/speakers.txt --split-srt work/split.srt
+tt_engine transcribe talk.mp4 --from-srt work/split.srt --from-words work/words.tsv --speakers-file work/speakers.txt -f txt,srt,docx
 ```
 
 `tt_engine COMMAND --help` lists each command's options (they are those of

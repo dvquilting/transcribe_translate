@@ -6,7 +6,9 @@
 #include <functional>
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
+#include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -77,7 +79,7 @@ int main(int argc, char** argv) {
     QStandardPaths::setTestModeEnabled(true);
     QApplication app(argc, argv);
     const bool pdfium = tt::pdfiumProblem().isEmpty();  // reading PDFs (TT_PDFIUM)
-    const int jobs = pdfium ? 9 : 8;                     // in the History at the end
+    const int jobs = pdfium ? 13 : 12;                     // in the History at the end
     QApplication::setOrganizationName(QStringLiteral("DavidV"));
     QApplication::setApplicationName(QStringLiteral("TranscribeTranslateTest"));
     QApplication::setApplicationDisplayName(QStringLiteral("Transcribe & Translate"));
@@ -346,6 +348,117 @@ int main(int argc, char** argv) {
             qunsetenv("TT_FAKE_PRELOAD_MS");
             if (device) device->setCurrentText(QStringLiteral("auto"));
             CHECK(waitFor([&] { return !engine.isPreloading(); }, 10000));
+        }
+
+        // ---- Transcribe with several speakers: three runs, and the Speakers window ----
+        {
+            tabs->setCurrentIndex(0);
+            QCheckBox* several = nullptr;
+            for (QCheckBox* c : tp->findChildren<QCheckBox*>())
+                if (c->text().startsWith(QStringLiteral("Several speakers"))) several = c;
+            CHECK(several);
+            if (several) several->setChecked(true);
+            // What to do in the Speakers window each time it opens.
+            std::function<void(QDialog*)> inWindow;
+            int windows = 0;
+            QTimer watch;
+            watch.setInterval(50);
+            QObject::connect(&watch, &QTimer::timeout, [&] {
+                auto* d = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (!d || d->windowTitle() != QStringLiteral("Speakers") || d->property("seen").toBool()) return;
+                d->setProperty("seen", true);
+                ++windows;
+                CHECK(tp->isRunning() && tt::JobGate::instance().busy());  // the run is waiting for the answer
+                if (inWindow) inWindow(d);
+            });
+            watch.start();
+            auto meeting = [&](const char* name) {
+                const QString m = work.filePath(QLatin1String(name) + QStringLiteral(".wav"));
+                QFile::copy(media, m);
+                tp->setInputFile(m);
+                return work.filePath(QLatin1String(name) + QStringLiteral(".txt"));
+            };
+            auto statusText = [&] {
+                for (QLabel* l : tp->findChildren<QLabel*>())
+                    if (l->text().startsWith(QStringLiteral("Done")) || l->text().startsWith(QStringLiteral("Cancelled")))
+                        return l->text();
+                return QString();
+            };
+
+            // Named, and written with the names.
+            QString out = meeting("meeting");
+            inWindow = [](QDialog* d) {
+                if (auto* name = d->findChild<QLineEdit*>(QStringLiteral("name0"))) name->setText(QStringLiteral("Anna"));
+                click(d, QStringLiteral("Continue"));
+            };
+            int before = (int)fakeRuns(log).size();
+            click(tp, QStringLiteral("Transcribe"));
+            // Finding the speakers shows how far it is (and not the late "49%").
+            bool half = false, back = false;
+            CHECK(waitFor([&] {
+                for (QLabel* l : tp->findChildren<QLabel*>()) {
+                    half = half || l->text() == QStringLiteral("Finding who speaks when: 50%");
+                    back = back || l->text() == QStringLiteral("Finding who speaks when: 49%");
+                }
+                return !tp->isRunning();
+            }));
+            CHECK(half && !back);
+            CHECK(windows == 1 && !tt::JobGate::instance().busy());
+            CHECK(readText(out) == QStringLiteral("Anna: Good morning, everyone.\n\nSpeaker 2: Today we talk about the budget.\n"));
+            runs = fakeRuns(log);
+            CHECK(runs.size() == before + 3);
+            CHECK(runs.value(before).startsWith(QStringLiteral("transcribe\t")) &&
+                  runs.value(before).contains(QStringLiteral("\t-f\tsrt\t")) && runs.value(before).contains(QStringLiteral("--words")));
+            CHECK(runs.value(before + 1).startsWith(QStringLiteral("speakers\t")));
+            CHECK(runs.value(before + 2).contains(QStringLiteral("--from-srt")) &&
+                  runs.value(before + 2).contains(QStringLiteral("--speakers-file")) &&
+                  runs.value(before + 2).contains(QStringLiteral("\t-f\ttxt\t")));
+            CHECK(!w.historyPage()->jobs().isEmpty() && w.historyPage()->jobs().first().ok &&
+                  w.historyPage()->jobs().first().outputs.size() == 1);  // only the transcript, not the work files
+
+            // "Detect again" with a number: another detection, another look.
+            out = meeting("again");
+            inWindow = [&](QDialog* d) {
+                if (windows == 2) {
+                    if (auto* count = d->findChild<QComboBox*>()) {
+                        for (QComboBox* c : d->findChildren<QComboBox*>())
+                            if (c->findData(8) >= 0) count = c;
+                        count->setCurrentIndex(count->findData(1));
+                    }
+                    click(d, QStringLiteral("Detect again"));
+                } else {
+                    click(d, QStringLiteral("Continue"));
+                }
+            };
+            before = (int)fakeRuns(log).size();
+            click(tp, QStringLiteral("Transcribe"));
+            CHECK(waitFor([&] { return !tp->isRunning(); }));
+            CHECK(windows == 3);
+            runs = fakeRuns(log);
+            CHECK(runs.size() == before + 4 && runs.value(before + 2).contains(QStringLiteral("--num-speakers\t1")));
+            CHECK(readText(out) == QStringLiteral("Good morning, everyone. Today we talk about the budget.\n"));  // one speaker
+
+            // Cancel in the window: nothing is written.
+            out = meeting("cancelled");
+            inWindow = [](QDialog* d) { click(d, QStringLiteral("Cancel")); };
+            click(tp, QStringLiteral("Transcribe"));
+            CHECK(waitFor([&] { return !tp->isRunning(); }));
+            CHECK(windows == 4 && !QFileInfo::exists(out) && !tt::JobGate::instance().busy());
+            CHECK(statusText().startsWith(QStringLiteral("Cancelled")));
+            CHECK(!w.historyPage()->jobs().isEmpty() && !w.historyPage()->jobs().first().ok);
+
+            // The speakers can't be found: the transcript is still written, without names.
+            out = meeting("nospeakers");
+            qputenv("TT_FAKE_SPEAKERS_FAIL", "1");
+            click(tp, QStringLiteral("Transcribe"));
+            CHECK(waitFor([&] { return !tp->isRunning(); }));
+            qunsetenv("TT_FAKE_SPEAKERS_FAIL");
+            CHECK(windows == 4);
+            CHECK(readText(out) == QStringLiteral("Good morning, everyone. Today we talk about the budget.\n"));
+            CHECK(statusText().contains(QStringLiteral("without speaker names")));
+            CHECK(!fakeRuns(log).last().contains(QStringLiteral("--speakers-file")));
+            watch.stop();
+            if (several) several->setChecked(false);
         }
 
         // Pictures of the tabs, for a look at the layout: TT_SCREENSHOTS=<folder>.
