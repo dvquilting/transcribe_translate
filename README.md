@@ -10,7 +10,8 @@ uploaded; each model is downloaded once, the first time it is needed.
 | [`transcribe_cpp`](transcribe_cpp) | Transcribe: speech to text (.txt, .srt, Word, PDF) - `transcribe_multi` + window |
 | [`translate_cpp`](translate_cpp) | Translate: text, Markdown, subtitles and Word documents - `translate_text` + window |
 | [`speech_translate_cpp`](speech_translate_cpp) | Speech Translate: audio/video to translated subtitles and dubbing (uses the two above) |
-| [`common`](common) | Code shared by the three separate programs |
+| [`enhance_cpp`](enhance_cpp) | Enhance Audio: speech noise removal and enhancement ([Resemble Enhance](https://github.com/resemble-ai/resemble-enhance) in ONNX Runtime, DirectML GPU) - `enhance_audio` + window |
+| [`common`](common) | Code shared by the separate programs |
 | [`android`](android) | The phone app (transcription and translation) |
 
 Speech recognition and voices use [CrispASR](https://github.com/CrispStrobe/CrispASR),

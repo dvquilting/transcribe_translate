@@ -1,0 +1,19 @@
+# Build-time only: converting Resemble Enhance's PyTorch weights to ONNX
+# (export_onnx.py) and the reference tests (reference.py, make_test_data.py).
+# The program itself uses no Python. Versions this was tested with:
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+torch==2.15.0
+torchaudio==2.11.1
+onnx==1.23.2
+onnxscript==0.7.2
+onnxruntime==1.32.0
+numpy==2.5.5
+scipy==1.18.1
+soundfile==0.14.0
+# imported by Resemble Enhance's model code
+omegaconf==2.4.0
+rich==15.0.0
+matplotlib==3.11.2
+pandas==3.1.1
+tqdm==4.70.1

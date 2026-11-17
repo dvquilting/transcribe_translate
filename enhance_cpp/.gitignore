@@ -1,0 +1,10 @@
+# Build outputs and downloads (build_all.bat makes them again)
+build-*/
+dist/
+third_party/
+tools/.venv/
+tools/model_repo/
+tools/__pycache__/
+# Test data written by tools/make_test_data.py, and test runs
+test_data/
+*.log
