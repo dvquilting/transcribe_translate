@@ -40,6 +40,10 @@ public:
     const Filters& filters() const { return filters_; }
     bool on_gpu() const { return gpu_index_ >= 0; }
 
+    // Gentle mode: after each GPU run, rest `rest` times as long as it took
+    // (1.0: the GPU works about half the time). 0: off.
+    void set_pace(double rest);
+
     // Load these networks now (they are otherwise loaded on first use).
     void load(std::initializer_list<Net> nets);
     // Unload these networks, freeing their memory.

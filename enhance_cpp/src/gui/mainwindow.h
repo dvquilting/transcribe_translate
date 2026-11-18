@@ -97,6 +97,7 @@ private:
     QComboBox* deviceCombo_ = nullptr;
     QSpinBox* chunkSpin_ = nullptr;
     QSpinBox* seedSpin_ = nullptr;
+    QCheckBox* gentleCheck_ = nullptr;
     QPushButton* startBtn_ = nullptr;
     QPushButton* cancelBtn_ = nullptr;
     QPushButton* helpBtn_ = nullptr;
@@ -119,6 +120,7 @@ private:
     QStringList runInputs_;   // the files of the current run
     int fileIndex_ = 0;       // 0-based, the file being processed
     QString lastProblem_;
+    QString logPath_;  // this run's log (enhance_audio's "Log:" line)
     int failures_ = 0;
     QStringList written_;
     QElapsedTimer runClock_;

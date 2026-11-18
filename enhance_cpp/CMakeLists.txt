@@ -61,13 +61,13 @@ if(ENHANCE_BUILD_CLI)
                             "which downloads them.")
     endif()
 
-    set(ENGINE_SOURCES src/engine/dsp.cpp src/engine/models.cpp src/engine/enhancer.cpp
+    set(ENGINE_SOURCES src/engine/dsp.cpp src/engine/models.cpp src/engine/enhancer.cpp src/engine/monitor.cpp
         ${TMX_SRC}/audio.cpp ${PK_COMMON_DIR}/src/fileio.cpp)
 
     add_executable(enhance_audio src/engine/cli_main.cpp ${ENGINE_SOURCES} src/engine/engine.rc)
     enh_set_compile_options(enhance_audio)
     target_include_directories(enhance_audio PRIVATE "${ORT_DIR}/build/native/include" "${DML_DIR}/include")
-    target_link_libraries(enhance_audio PRIVATE "${ORT_BIN}/onnxruntime.lib" dxgi shell32 winmm)
+    target_link_libraries(enhance_audio PRIVATE "${ORT_BIN}/onnxruntime.lib" d3d12 dxgi shell32 winmm)
 
     # ONNX Runtime and the DirectML redistributable next to the program (Windows'
     # own DirectML.dll is too old for this ONNX Runtime).

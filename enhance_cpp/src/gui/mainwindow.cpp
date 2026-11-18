@@ -192,6 +192,10 @@ void MainWindow::buildUi() {
     qualityCombo_->setToolTip(tr("Steps of the enhancement model's solver: more is slower and a little cleaner."));
     ef->addRow(tr("Quality:"), qualityCombo_);
     ml->addWidget(enhanceOptions_);
+    gentleCheck_ = new QCheckBox(tr("Go easy on the graphics card (about half the speed; less heat and power)"));
+    gentleCheck_->setToolTip(tr("The graphics card rests after each piece of work as long as the work took.\n"
+                                "Use it if the computer becomes unstable or the card gets hot while enhancing."));
+    ml->addWidget(gentleCheck_);
     root->addWidget(modeBox_);
 
     // ---- advanced ----
@@ -431,6 +435,7 @@ QStringList MainWindow::arguments() const {
     a << QStringLiteral("--chunk-seconds") << QString::number(chunkSpin_->value())
       << QStringLiteral("--device") << deviceCombo_->currentData().toString()
       << QStringLiteral("-f") << formatArg() << QStringLiteral("-y");
+    if (gentleCheck_->isChecked()) a << QStringLiteral("--gentle");
     if (toFolder_->isChecked())
         a << QStringLiteral("--out-dir") << QDir::fromNativeSeparators(outDirEdit_->text().trimmed());
     a << runInputs_;
@@ -473,6 +478,7 @@ void MainWindow::start() {
     logView_->clear();
     written_.clear();
     lastProblem_.clear();
+    logPath_.clear();
     failures_ = 0;
     fileIndex_ = 0;
     engineBackend_.clear();
@@ -529,6 +535,11 @@ void MainWindow::parseLine(const QString& line) {
         setEngine(m.captured(1), m.captured(2), false);
         return;
     }
+    static const QRegularExpression logRe(QStringLiteral("^Log: (.+)$"));
+    if (const auto lm = logRe.match(line); lm.hasMatch()) {
+        logPath_ = lm.captured(1).trimmed();
+        return;
+    }
     static const QRegularExpression wroteRe(QStringLiteral("^Wrote: (.+)$"));
     if (const auto m = wroteRe.match(line); m.hasMatch()) {
         const QString out = QFileInfo(m.captured(1).trimmed()).absoluteFilePath();
@@ -572,7 +583,10 @@ void MainWindow::processFinished(int exitCode, bool cancelled) {
                                   .arg(written_.size()).arg(runInputs_.size()).arg(lastProblem_.toHtmlEscaped()));
         tabs_->setCurrentWidget(logView_);
     } else if (!lastProblem_.isEmpty()) {
-        statusLabel_->setText(tr("Failed: %1").arg(lastProblem_.toHtmlEscaped()));
+        statusLabel_->setText(tr("Failed: %1").arg(lastProblem_.toHtmlEscaped()) +
+                              (logPath_.isEmpty() ? QString()
+                                                  : QStringLiteral("<br>") + tr("Run log: %1")
+                                                        .arg(QDir::toNativeSeparators(logPath_).toHtmlEscaped())));
         tabs_->setCurrentWidget(logView_);
     } else {
         statusLabel_->setText(tr("Failed (exit code %1). See the log.").arg(exitCode));
@@ -652,6 +666,7 @@ void MainWindow::loadSettings() {
     pick(formatCombo_, s.value(QStringLiteral("format"), QStringLiteral("wav")).toString());
     chunkSpin_->setValue(s.value(QStringLiteral("chunkSeconds"), 30).toInt());
     seedSpin_->setValue(s.value(QStringLiteral("seed"), 0).toInt());
+    gentleCheck_->setChecked(s.value(QStringLiteral("gentle"), false).toBool());
     outDirEdit_->setText(s.value(QStringLiteral("outDir")).toString());
     (s.value(QStringLiteral("toFolder"), false).toBool() ? toFolder_ : nextToInput_)->setChecked(true);
     const QString last = s.value(QStringLiteral("lastEngine")).toString();
@@ -671,6 +686,7 @@ void MainWindow::saveSettings() {
     s.setValue(QStringLiteral("format"), formatArg());
     s.setValue(QStringLiteral("chunkSeconds"), chunkSpin_->value());
     s.setValue(QStringLiteral("seed"), seedSpin_->value());
+    s.setValue(QStringLiteral("gentle"), gentleCheck_->isChecked());
     s.setValue(QStringLiteral("outDir"), outDirEdit_->text());
     s.setValue(QStringLiteral("toFolder"), toFolder_->isChecked());
     s.setValue(QStringLiteral("geometry"), saveGeometry());
@@ -741,7 +757,13 @@ void MainWindow::showHelp() {
            "<li>The output is mono at 44.1 kHz (the model's own format); stereo input is mixed to mono.</li>"
            "<li>The model was trained on speech. Music and singing are not improved and can be damaged.</li>"
            "<li>A graphics card that other programs are using heavily at the same time makes the enhancement "
-           "much slower.</li>"
+           "much slower. Close programs that keep AI models loaded on the card (such as Transcribe &amp; "
+           "Translate) first.</li>"
+           "<li><b>Go easy on the graphics card</b> halves the load: try it if the computer freezes or the "
+           "graphics driver resets during long files.</li>"
+           "<li>Every run writes a log with the graphics card's temperature, power and memory once a second, "
+           "in %LOCALAPPDATA%\\EnhanceAudio\\logs (the last 20 are kept). After a crash, the next run "
+           "shows how the previous log ended.</li>"
            "<li>Files that ffmpeg reads are accepted: WAV, MP3, FLAC, M4A, OGG, video files, ...</li></ul>");
     pk::show_help_window(this, tr("Enhance Audio - Help"), html);
 }

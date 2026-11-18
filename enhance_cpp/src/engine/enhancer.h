@@ -31,6 +31,12 @@ using Progress = std::function<void(double fraction, const std::string& stage)>;
 // have the enhancer networks unless o.denoise_only.
 std::vector<float> process(Models& models, const std::vector<float>& wav, const Options& o, const Progress& progress);
 
+// The GPU memory the denoiser needs for pieces of this length (GB).
+double denoiser_memory_gb(double chunk_seconds);
+// The piece length to use: `wanted`, or shorter (down to 10 s) when the GPU memory
+// that other programs leave free is too small for the denoiser on `wanted`.
+double fit_chunk_seconds(const Models& models, double wanted);
+
 const char* solver_name(Solver s);
 bool parse_solver(const std::string& s, Solver& out);
 

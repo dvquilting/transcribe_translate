@@ -3,6 +3,8 @@
 // reads its output lines ("Engine:", "Progress:", "Wrote:", "Warning:", "Error:").
 #include <algorithm>
 #include <chrono>
+#include <ctime>
+#include <memory>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +29,7 @@
 #include "audio.h"  // ../transcribe_cpp/src: ffmpeg decoding
 #include "enhancer.h"
 #include "fileio.h"  // ../common/src
+#include "monitor.h"
 #include "utf8_path.h"
 
 namespace fs = std::filesystem;
@@ -73,6 +76,13 @@ void usage() {
         "      --threads N           CPU threads (default: all)\n"
         "      --models-dir DIR      the model files (default: models\\ next to this program)\n"
         "  -y, --overwrite           replace existing outputs (default: refuse)\n"
+        "      --gentle              go easy on the graphics card: rest after each GPU run as long\n"
+        "                            as it took (about half the speed, less heat and power)\n"
+        "      --log FILE            the run log (default: a new file in\n"
+        "                            %%LOCALAPPDATA%%\\EnhanceAudio\\logs; the last 20 are kept);\n"
+        "                            once a second the GPU's temperature, power, clocks and memory\n"
+        "                            and what is running, written straight to disk\n"
+        "      --no-log              no run log\n"
         "      --benchmark           time the enhancement network on this computer (no INPUT)\n"
         "  -h, --help                show this help\n",
         kVersion);
@@ -235,6 +245,9 @@ struct Settings {
     int gpu = 0, threads = 0;
     bool overwrite = false;
     bool benchmark = false;
+    bool gentle = false;
+    bool no_log = false;
+    std::string log;
 };
 
 fs::path output_for(const Settings& s, const std::string& input, const Probe& p) {
@@ -352,6 +365,9 @@ Settings parse(const std::vector<std::string>& a) {
         else if (x == "--models-dir") s.models_dir = value();
         else if (x == "-y" || x == "--overwrite") s.overwrite = true;
         else if (x == "--benchmark") s.benchmark = true;
+        else if (x == "--gentle") s.gentle = true;
+        else if (x == "--log") s.log = value();
+        else if (x == "--no-log") s.no_log = true;
         else if (x.size() > 1 && x[0] == '-') die("unknown option " + x + " (see --help)");
         else s.inputs.push_back(x);
     }
@@ -386,6 +402,34 @@ int main(int argc, char** argv) {
     const Settings s = parse(utf8_argv(argc, argv));
     if (!tmx::ffmpeg_available()) die("ffmpeg was not found (put ffmpeg.exe next to this program or on PATH)");
 
+    // The run log ("crash recorder"). A previous run whose log has no end stopped in
+    // the middle: a crash, a kill, or the computer stopping.
+    std::unique_ptr<enh::Recorder> recorder;
+    if (!s.no_log) {
+        std::string path = s.log;
+        if (path.empty()) {
+            const std::string dir = enh::Recorder::default_dir();
+            const std::string unfinished = enh::Recorder::unfinished_previous(dir);
+            if (!unfinished.empty()) say("Note: the previous run did not finish. Its log ends with: " + unfinished);
+            enh::Recorder::prune(dir, 19);
+            const std::time_t t = std::time(nullptr);
+            std::tm tm{};
+            localtime_s(&tm, &t);
+            char name[64];
+            std::strftime(name, sizeof(name), "enhance-%Y%m%d-%H%M%S.log", &tm);
+            path = pk::path_to_utf8(pk::path_from_utf8(dir) / name);
+        }
+        recorder = std::make_unique<enh::Recorder>(path);
+        if (recorder->ok()) {
+            say("Log: " + path);
+            std::string cmd = "command:";
+            for (const auto& a : utf8_argv(argc, argv)) cmd += " " + a;
+            recorder->note(cmd);
+        } else {
+            recorder.reset();
+        }
+    }
+
     // Check the outputs before the long part.
     for (const auto& in : s.inputs)
         if (!fs::exists(pk::path_from_utf8(in))) die("no such file: " + in);
@@ -400,6 +444,15 @@ int main(int argc, char** argv) {
     }
     const auto& eng = models->engine();
     say("Engine: " + eng.backend + (eng.detail.empty() ? "" : " (" + eng.detail + ")"));
+    if (recorder) {
+        recorder->note("engine " + eng.backend + " " + eng.detail);
+        if (models->on_gpu())
+            recorder->watch_gpu(eng.detail, [&m = *models](double& u, double& b) { return m.gpu_memory(u, b); });
+    }
+    if (s.gentle) {
+        models->set_pace(1.0);
+        say("Gentle mode: the GPU rests after each run as long as the run took.");
+    }
     say("Models loaded in " +
         format_seconds(std::chrono::duration<double>(std::chrono::steady_clock::now() - t_load).count()));
     if (s.opt.denoise_only) say("Mode: denoise only");
@@ -444,6 +497,8 @@ int main(int argc, char** argv) {
             say("Decoding " + input);
             std::vector<float> wav = load_mono(input, p);
             const double seconds = (double)wav.size() / p.rate;
+            if (recorder) recorder->stage("file " + std::to_string(k + 1) + "/" + std::to_string(s.inputs.size()) +
+                                          ": " + input);
             say("Audio : " + format_seconds(seconds) + ", " + std::to_string(p.rate) + " Hz, " +
                 (p.channels == 1 ? std::string("mono") : std::to_string(std::max(p.channels, 1)) + " channels"));
             wav = enh::resample(wav, p.rate, enh::kRate);
@@ -460,7 +515,17 @@ int main(int argc, char** argv) {
                 std::snprintf(buf, sizeof(buf), "Progress: %.1f%% %s", pct / 10.0, stage.c_str());
                 say(buf);
             };
-            std::vector<float> result = enh::process(*models, wav, s.opt, progress);
+            enh::Options opt = s.opt;
+            if (models->on_gpu()) {
+                opt.chunk_seconds = enh::fit_chunk_seconds(*models, s.opt.chunk_seconds);
+                if (opt.chunk_seconds < s.opt.chunk_seconds) {
+                    char buf[200];
+                    std::snprintf(buf, sizeof(buf), "Note: little GPU memory is free; using %.0f s pieces instead of "
+                                  "%.0f s.", opt.chunk_seconds, s.opt.chunk_seconds);
+                    say(buf);
+                }
+            }
+            std::vector<float> result = enh::process(*models, wav, opt, progress);
             wav.clear();
             wav.shrink_to_fit();
             const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -486,6 +551,7 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) {
             ++failed;
             say("Error: " + input + ": " + e.what());
+            if (recorder) recorder->note(std::string("error: ") + e.what());
         }
     }
     if (failed) return s.inputs.size() == 1 ? 1 : 4;

@@ -76,6 +76,8 @@ enhance_audio --help
 | `--chunk-seconds` | chunk length (1 s overlap) | 30 |
 | `--seed` | the random numbers (prior and vocoder noise) | 0 |
 | `--device` | auto (DirectML GPU, else CPU), gpu, cpu | auto |
+| `--gentle` | (not in the original) the GPU rests after each run as long as it took: about half the load | off |
+| `--log FILE` / `--no-log` | (not in the original) the run log, see below | a new file in `%LOCALAPPDATA%\EnhanceAudio\logs` |
 
 ## How the port works
 
@@ -116,11 +118,37 @@ order.
   amplifies float rounding: the original itself moves further when its mel
   spectrogram is nudged by 4e-4.
 - `enhance_audio --benchmark` times the enhancement network on this computer.
-- `ENHANCE_PROFILE=1` prints the time and GPU memory of each stage; `ENHANCE_ORT_VERBOSE=1`
+- `ENHANCE_PROFILE=1` prints the time and GPU memory of each stage; `ENHANCE_LOG_RUNS=1` writes
+  every GPU run's length into the run log; `ENHANCE_ORT_VERBOSE=1`
   ONNX Runtime's own log.
 
 Note: Resemble Enhance's `Solver.exponential_decay_mapping` fails with NumPy 2
 (`float()` of a 1-element array); the build tools patch it with the same computation.
+
+## Stability: the GPU and the run log
+
+On 17 November 2026 a 65-minute file at full quality froze the development PC twice:
+each time the NVIDIA driver timed out (Windows "LiveKernelEvent 141"), the desktop lost
+its GPU and the system hung without a blue screen. Measured on an idle RTX 5060 Ti,
+no single GPU run of this program comes near Windows' 2 s timeout (CFM evaluation
+0.19 s at most, vocoder window 0.27 s, denoiser 0.13 s plus about 0.8 s the first time
+a network is prepared), so the cause is open: another program loading the GPU
+at the same time, the long full load (150-160 W, up to 77 C), or the hardware or driver.
+What the program does about it:
+
+- one Direct3D 12 device and one compute queue for all networks (not a device per
+  network and per group of chunks), so the desktop's own GPU queue is left alone;
+- before each stage it checks the GPU memory other programs leave free, warns when it
+  is short, and uses shorter pieces (down to 10 s) when the denoiser would not fit;
+- `--gentle` (the window: *Go easy on the graphics card*) halves the GPU load;
+- a driver reset during a run is reported as such ("device removed"), with what to try;
+- **the run log**: every run writes `%LOCALAPPDATA%\EnhanceAudio\logs\enhance-DATE-TIME.log`
+  (the last 20 are kept). Once a second it records what is running (stage, chunk, the
+  network and how long its current GPU run has taken), the GPU's temperature, power,
+  clock, load, memory, fan and any throttling (NVIDIA cards, through `nvml.dll`; other
+  cards: memory only), and GPU runs of 1 s or more as they end. Every line is forced to
+  disk, so the last second before a freeze is kept. A log without its final `end` line
+  belongs to a run that did not finish; the next run prints how it ended.
 
 ## Layout
 
@@ -129,6 +157,7 @@ CMakeLists.txt
 build_all.bat, clean.bat
 src/engine/dsp.*        signal processing (STFT, mel, resampling, chunk merging, noise)
 src/engine/models.*     the ONNX networks in ONNX Runtime (DirectML / CPU), loaded per stage
+src/engine/monitor.*    the run log (GPU state once a second, flushed to disk)
 src/engine/enhancer.*   the inference pipeline
 src/engine/cli_main.cpp enhance_audio.exe (decoding and encoding via ffmpeg)
 src/gui/                enhance_audio_gui.exe (Qt6 Widgets + Multimedia)

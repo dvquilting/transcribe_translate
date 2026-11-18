@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <stdexcept>
 
+#include "monitor.h"
+
 namespace enh {
 
 namespace {
@@ -222,6 +224,34 @@ void stage_vocode(Models& models, Chunk& c, int core, const Report& report) {
     c.out = std::move(y);
 }
 
+// The run log: what is being done, with the GPU memory free for this process.
+void log_stage(const Models& models, const std::string& what) {
+    Recorder* rec = Recorder::current();
+    if (!rec) return;
+    double used = 0, budget = 0;
+    if (models.gpu_memory(used, budget)) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), " (GPU memory free %.1f GB)", budget - used);
+        rec->stage(what + buf);
+    } else {
+        rec->stage(what);
+    }
+}
+
+// Before a stage on the GPU: warn when other programs leave it little memory
+// (Windows then swaps GPU memory, which is very slow and has made drivers time out).
+void check_memory(const Models& models, double need_gb, const char* stage) {
+    double used = 0, budget = 0;
+    if (!models.gpu_memory(used, budget)) return;
+    const double free_gb = budget - used;
+    if (free_gb >= need_gb) return;
+    std::printf("Warning: only %.1f GB of GPU memory is free for %s (about %.1f GB is needed); other programs "
+                "are using the rest. Close them, or use --chunk-seconds 10 or --device cpu.\n",
+                std::max(0.0, free_gb), stage, need_gb);
+    std::fflush(stdout);
+    if (Recorder* rec = Recorder::current()) rec->note("low GPU memory before " + std::string(stage));
+}
+
 // The vocoder window (frames kept per run) for the GPU memory that is free.
 int vocoder_core(const Models& models) {
     double used = 0, budget = 0;
@@ -233,6 +263,21 @@ int vocoder_core(const Models& models) {
 }
 
 }  // namespace
+
+double denoiser_memory_gb(double chunk_seconds) {
+    // Measured: about 3.2 GB for 30 s pieces (the UNet's activations grow with the
+    // piece), plus the network.
+    return 0.3 + 0.1 * chunk_seconds;
+}
+
+double fit_chunk_seconds(const Models& models, double wanted) {
+    double used = 0, budget = 0;
+    if (!models.gpu_memory(used, budget)) return wanted;
+    const double free_gb = budget - used - 0.5;  // room for the other networks' weights
+    double s = wanted;
+    while (s > 10 && denoiser_memory_gb(s) > free_gb) s -= 5;
+    return s;
+}
 
 const char* solver_name(Solver s) {
     switch (s) {
@@ -292,10 +337,18 @@ std::vector<float> process(Models& models, const std::vector<float>& wav, const 
 
     Timer timer;
     timer.models = &models;
+    auto where = [&](const char* stage, size_t i) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "%s chunk %zu/%zu", stage, i + 1, n);
+        log_stage(models, buf);
+    };
+    const double denoiser_gb = denoiser_memory_gb(o.chunk_seconds);
     for (size_t g0 = 0; g0 < n; g0 += group) {
         const size_t g1 = std::min(n, g0 + group);
         if (o.denoise_only) {
+            if (g0 == 0) check_memory(models, denoiser_gb, "the denoiser");
             for (size_t i = g0; i < g1; ++i) {
+                where("denoise", i);
                 report(i, 0, w_mel, 0, "Denoising");
                 Chunk& c = chunks[i];
                 std::vector<float> y = run_denoiser(models, chunk_input(wav, c, false));
@@ -306,13 +359,17 @@ std::vector<float> process(Models& models, const std::vector<float>& wav, const 
             timer.lap("denoise");
             continue;
         }
+        if (denoise_stage) check_memory(models, denoiser_gb, "the denoiser");
         for (size_t i = g0; i < g1; ++i) {
+            where("denoise", i);
             report(i, 0, w_mel, 0, denoise_stage ? "Denoising" : "Analysing");
             stage_mels(models, wav, chunks[i], o.lambd);
         }
         timer.lap("denoise");
         models.release({Net::Denoiser});
+        check_memory(models, 1.5, "the enhancer");
         for (size_t i = g0; i < g1; ++i) {
+            where("enhance", i);
             report(i, w_mel, w_solve, 0, "Enhancing");
             stage_solve(models, chunks[i], o,
                         [&](double f) { report(i, w_mel, w_solve, f, "Enhancing"); });
@@ -320,7 +377,9 @@ std::vector<float> process(Models& models, const std::vector<float>& wav, const 
         timer.lap("solve");
         models.release({Net::Encoder, Net::Velocity, Net::Decoder});
         const int core = vocoder_core(models);
+        check_memory(models, core >= 512 ? 4.0 : core >= 256 ? 2.3 : 1.4, "the vocoder");
         for (size_t i = g0; i < g1; ++i) {
+            where("vocode", i);
             report(i, w_mel + w_solve, w_voc, 0, "Vocoding");
             stage_vocode(models, chunks[i], core,
                          [&](double f) { report(i, w_mel + w_solve, w_voc, f, "Vocoding"); });
